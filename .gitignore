@@ -2,7 +2,7 @@
 /DECISIONS.md
 
 # data & models
-/data/
+/training/data/
 *.ckpt
 *.pt
 *.onnx
@@ -13,6 +13,20 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Android / Gradle
+/android/.gradle/
+/android/local.properties
+/android/app/build/
+/android/build/
+/android/.idea/
+*.apk
+*.aab
+
+# C++ build
+/edge-engine/build/
+/edge-engine/third_party/*
+!/edge-engine/third_party/.gitkeep
 
 # OS
 .DS_Store
