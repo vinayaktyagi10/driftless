@@ -8,6 +8,14 @@
 *.onnx
 *.tflite
 
+# ...but DO track the exported models role 01 and roles 04-05 consume, so nobody
+# needs the 425 MB dataset or a training run just to build the app. 312 KB total,
+# and each is verified against PyTorch to ~1e-6 before it is written (see
+# training/artifacts/models/export_report.json).
+!/training/artifacts/models/*.onnx
+!/training/artifacts/models/*.onnx.data
+!/training/artifacts/models/*.tflite
+
 # env
 .env
 .venv/

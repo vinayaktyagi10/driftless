@@ -1,7 +1,187 @@
-"""Entry point: python -m driftless_train.train
+"""Train the speed & heading-change regressor.
 
-Trains VelocityNet on IoVnbdWindowedDataset, checkpoints to training/export/.
+Run:  python -m driftless.train --epochs 30
+Out:  artifacts/models/tcn_best.pt, artifacts/models/stats.json,
+      artifacts/metrics/train_log.csv
 """
 
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from .dataset import (OUT_WIN, PROC_DIR, STRIDE_TRAIN, WIN, WindowDataset,
+                      compute_stats, load_index, make_splits, split_runs)
+from .model import SpeedHeadingTCN
+
+from .paths import METRIC_DIR, MODEL_DIR
+
+
+def pick_device(requested: str = "auto") -> torch.device:
+    if requested != "auto":
+        return torch.device(requested)
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def run_epoch(model, loader, device, y_std, opt=None, sched=None):
+    """One pass. Loss is Huber on std-normalised residuals so the two heads --
+    metres per second and radians -- contribute comparably."""
+    train = opt is not None
+    model.train(train)
+    huber = nn.HuberLoss(delta=1.0, reduction="mean")
+    tot, n = 0.0, 0
+    abs_err = None
+
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        with torch.set_grad_enabled(train):
+            pred = model(x)
+            loss = huber((pred - y) / y_std, torch.zeros_like(y))
+        if train:
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            if sched is not None:
+                sched.step()
+        bs = x.shape[0]
+        tot += float(loss.detach()) * bs
+        n += bs
+        e = (pred - y).abs().sum(dim=0).detach().cpu().numpy()
+        abs_err = e if abs_err is None else abs_err + e
+
+    if abs_err is None:
+        abs_err = np.zeros(3)
+    return tot / max(n, 1), abs_err / max(n, 1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--width", type=int, default=48)
+    ap.add_argument("--win", type=int, default=WIN, help="context length, samples")
+    ap.add_argument("--out-win", type=int, default=OUT_WIN,
+                    help="output interval, samples")
+    ap.add_argument("--stride", type=int, default=STRIDE_TRAIN)
+    ap.add_argument("--device", default="auto")
+    ap.add_argument("--proc-dir", type=Path, default=PROC_DIR)
+    ap.add_argument("--min-coupling", type=float, default=0.0,
+                    help="drop TRAIN runs whose phone/vehicle coupling is below "
+                         "this; val/test are already restricted to trusted runs")
+    ap.add_argument("--tag", default="", help="suffix for checkpoint filenames")
+    ap.add_argument("--smoke", action="store_true",
+                    help="tiny run for plumbing checks; ignores the split policy")
+    args = ap.parse_args(argv)
+
+    tag = f"_{args.tag}" if args.tag else ""
+    runs, idx = load_index(args.proc_dir)
+    channels = idx["channels"]
+    print(f"{len(runs)} runs, {len(channels)} channels")
+
+    if args.smoke:
+        parts = {"train": runs, "val": runs, "test": runs}
+        print("SMOKE MODE: train == val, numbers are meaningless")
+    else:
+        splits = make_splits(runs)
+        parts = split_runs(runs, splits, min_coupling=args.min_coupling)
+        for k, v in parts.items():
+            hrs = sum(1 for _ in v)
+            print(f"  {k:5} {len(v):3d} runs")
+        if not parts["train"] or not parts["val"]:
+            print("\nnot enough routes for a real split yet -- use --smoke, or "
+                  "prepare more routes first")
+            return 1
+
+    ds_tr = WindowDataset(parts["train"], win=args.win, stride=args.stride,
+                          out_win=args.out_win)
+    ds_va = WindowDataset(parts["val"], win=args.win, stride=args.out_win,
+                          out_win=args.out_win)
+    print(f"windows: train {len(ds_tr)}  val {len(ds_va)}")
+    if not len(ds_tr) or not len(ds_va):
+        print("empty window set")
+        return 1
+
+    stats = compute_stats(ds_tr)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    METRIC_DIR.mkdir(parents=True, exist_ok=True)
+    (MODEL_DIR / f"stats{tag}.json").write_text(json.dumps(
+        {**stats, "channels": channels, "win": args.win,
+         "out_win": args.out_win, "fs_hz": idx["fs_hz"]},
+        indent=2))
+    from .dataset import TARGETS
+    print("targets", TARGETS, "\n  mean", np.round(stats["y_mean"], 4).tolist(),
+          "\n  std ", np.round(stats["y_std"], 4).tolist())
+
+    device = pick_device(args.device)
+    model = SpeedHeadingTCN(len(channels), width=args.width,
+                            n_out=len(stats["y_mean"])).to(device)
+    model.set_stats(stats)
+    print(f"device {device}  params {model.n_params}")
+
+    y_std = torch.tensor(stats["y_std"], dtype=torch.float32, device=device)
+    dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True,
+                       num_workers=0, drop_last=True)
+    dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False,
+                       num_workers=0)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                            weight_decay=args.weight_decay)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=args.lr, total_steps=args.epochs * max(len(dl_tr), 1),
+        pct_start=0.25)
+
+    log_path = METRIC_DIR / f"train_log{tag}.csv"
+    with log_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["epoch", "train_loss", "val_loss", "val_speed_mae_ms",
+                    "val_dpsi_mae_rad", "val_dpsi_mae_deg", "lr", "secs"])
+
+        best = float("inf")
+        for ep in range(1, args.epochs + 1):
+            t0 = time.time()
+            tr_loss, _ = run_epoch(model, dl_tr, device, y_std, opt, sched)
+            va_loss, va_mae = run_epoch(model, dl_va, device, y_std)
+            dt = time.time() - t0
+            lr_now = opt.param_groups[0]["lr"]
+            w.writerow([ep, f"{tr_loss:.6f}", f"{va_loss:.6f}",
+                        f"{va_mae[0]:.4f}", f"{va_mae[1]:.6f}",
+                        f"{np.rad2deg(va_mae[1]):.4f}",
+                        f"{va_mae[2]:.4f}" if len(va_mae) > 2 else "",
+                        f"{lr_now:.2e}", f"{dt:.1f}"])
+            f.flush()
+            flag = ""
+            if va_loss < best:
+                best = va_loss
+                torch.save({"state_dict": model.state_dict(), "stats": stats,
+                            "channels": channels, "win": args.win,
+                            "out_win": args.out_win,
+                            "width": args.width, "epoch": ep},
+                           MODEL_DIR / f"tcn_best{tag}.pt")
+                flag = " *"
+            print(f"ep {ep:3d}/{args.epochs}  train {tr_loss:.4f}  val {va_loss:.4f}"
+                  f"  speed MAE {va_mae[0]:.3f} m/s"
+                  f"  dpsi MAE {np.rad2deg(va_mae[1]):.3f} deg"
+                  f"  dv MAE {va_mae[2]:.3f} m/s  ({dt:.0f}s){flag}",
+                  flush=True)
+
+    print(f"\nbest val {best:.4f} -> {MODEL_DIR/f'tcn_best{tag}.pt'}")
+    return 0
+
+
 if __name__ == "__main__":
-    raise NotImplementedError("wire up once dataset.py and model.py are settled")
+    raise SystemExit(main())
