@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="driftless-test-fixture">
+  <node id="1" lat="26.8467000" lon="75.8056000"/>
+  <node id="2" lat="26.8467000" lon="75.8066000"/>
+  <node id="3" lat="26.8467000" lon="75.8076000"/>
+  <node id="4" lat="26.8476000" lon="75.8056000"/>
+  <node id="5" lat="26.8476000" lon="75.8066000"/>
+  <node id="6" lat="26.8476000" lon="75.8076000"/>
+  <node id="7" lat="26.8485000" lon="75.8056000"/>
+  <node id="8" lat="26.8485000" lon="75.8066000"/>
+  <node id="9" lat="26.8485000" lon="75.8076000"/>
+  <node id="10" lat="26.8471500" lon="75.8052000"/>
+  <node id="11" lat="26.8480500" lon="75.8052000"/>
+  <way id="100">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="EW 0"/>
+  </way>
+  <way id="101">
+    <nd ref="4"/>
+    <nd ref="5"/>
+    <nd ref="6"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="EW 1"/>
+  </way>
+  <way id="102">
+    <nd ref="7"/>
+    <nd ref="8"/>
+    <nd ref="9"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="EW 2"/>
+  </way>
+  <way id="103">
+    <nd ref="1"/>
+    <nd ref="4"/>
+    <nd ref="7"/>
+    <tag k="highway" v="secondary"/>
+  </way>
+  <way id="104">
+    <nd ref="2"/>
+    <nd ref="5"/>
+    <nd ref="8"/>
+    <tag k="highway" v="secondary"/>
+  </way>
+  <way id="105">
+    <nd ref="3"/>
+    <nd ref="6"/>
+    <nd ref="9"/>
+    <tag k="highway" v="secondary"/>
+  </way>
+  <way id="106">
+    <nd ref="10"/>
+    <nd ref="11"/>
+    <tag k="highway" v="footway"/>
+  </way>
+</osm>
