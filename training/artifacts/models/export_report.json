@@ -36,19 +36,19 @@
     "size_kb": 123.4,
     "n_test_windows": 64,
     "max_abs_diff_per_output": [
-      4.77e-06,
-      6e-07,
-      1.42e-06
+      5.72e-06,
+      2.4e-07,
+      2.09e-06
     ],
     "output_std": [
-      5.532575,
-      0.285022,
-      0.969662
+      5.026846,
+      0.2895,
+      0.918985
     ],
-    "max_rel_diff": 2.09e-06,
+    "max_rel_diff": 2.27e-06,
     "tolerance_rel": 0.001,
     "passed": true,
-    "latency_ms_per_window": 0.1147
+    "latency_ms_per_window": 0.1183
   },
   "tflite": {
     "path": "/Users/rohitkumaryadav/Documents/Projects/driftless/training/artifacts/models/tcn_speed_heading.tflite",
@@ -62,19 +62,19 @@
     ],
     "input_layout": "NWC / channels-last (time-major) -- note this differs from the ONNX model's NCW",
     "quantisation": "none (float32). int8 dynamic-range costs 2-8% error, float16 is unusable here (>100%); the model is small enough that neither is worth it.",
-    "keras_vs_torch_max_rel": 1.5e-06,
-    "latency_ms_per_window": 0.0683,
+    "keras_vs_torch_max_rel": 1.09e-06,
+    "latency_ms_per_window": 0.0672,
     "max_abs_diff_per_output": [
-      3.81e-06,
-      6e-07,
-      1.43e-06
+      5.72e-06,
+      2.4e-07,
+      1.31e-06
     ],
     "output_std": [
-      5.20528,
-      0.318675,
-      0.83415
+      4.811028,
+      0.322414,
+      0.871274
     ],
-    "max_rel_diff": 1.87e-06,
+    "max_rel_diff": 1.51e-06,
     "tolerance_rel": 0.02,
     "passed": true
   }

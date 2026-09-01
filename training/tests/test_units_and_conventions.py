@@ -108,11 +108,60 @@ def test_gyro_vertical_axis_is_the_pitch_labelled_column():
     assert set(GYRO_XYZ_COLUMNS) == {"gyro_yaw", "gyro_pitch", "gyro_roll"}
 
 
-def test_gravity_column_is_not_used_as_the_attitude_source():
-    """The GRAVITY column is near-constant on this dataset, so attitude comes
-    from a low-passed accelerometer instead."""
+def test_gravity_comes_from_a_causal_lowpass_of_the_accelerometer():
+    """Attitude must come from a CAUSAL low-pass of the accelerometer.
+
+    Two separate requirements, both previously violated:
+      * not the GRAVITY column -- it is near-constant (0, 0, 9.8066) on this
+        dataset and carries no attitude information;
+      * not a centred filter -- the original np.convolve(..., mode="same")
+        averaged ~10 s of FUTURE samples into the current row, which breaks the
+        causality guarantee the windowing relies on and cannot be reproduced on
+        a phone in real time.
+    """
     import inspect
 
     from driftless_train import preprocess
+
     src = inspect.getsource(preprocess._add_imu_features)
-    assert "convolve" in src, "expected a low-pass of the accelerometer"
+    assert "_causal_gravity" in src, "attitude must use the causal estimator"
+    assert 'mode="same"' not in src, "centred filter reintroduced -- non-causal"
+
+    helper = inspect.getsource(preprocess._causal_gravity)
+    assert "lfilter" in helper, "expected a one-pole recursive (causal) filter"
+
+
+def test_causal_gravity_uses_no_future_samples():
+    """Behavioural, not textual: perturbing a future sample must not change the
+    gravity estimate at an earlier index."""
+    import numpy as np
+
+    from driftless_train.preprocess import _causal_gravity
+
+    rng = np.random.default_rng(0)
+    acc = rng.normal(size=(500, 3)) + np.array([0.0, 0.0, 9.81])
+    base = _causal_gravity(acc, dt_s=0.1)
+
+    bumped = acc.copy()
+    bumped[300:] += 50.0
+    after = _causal_gravity(bumped, dt_s=0.1)
+
+    assert np.allclose(base[:300], after[:300], atol=1e-12), \
+        "gravity estimate at t depends on samples after t"
+    assert not np.allclose(base[300:], after[300:]), "perturbation had no effect"
+
+
+def test_causal_gravity_commutes_with_rotation():
+    """Linearity is what makes the derived channels exactly mount-invariant."""
+    import numpy as np
+
+    from driftless_train.augment import tilt_rotation
+    from driftless_train.preprocess import _causal_gravity
+
+    rng = np.random.default_rng(1)
+    acc = rng.normal(size=(400, 3)) + np.array([0.0, 0.0, 9.81])
+    R = tilt_rotation(rng)
+
+    lp_then_rot = np.einsum("ij,kj->ik", _causal_gravity(acc, 0.1), R)
+    rot_then_lp = _causal_gravity(np.einsum("ij,kj->ik", acc, R), 0.1)
+    assert np.abs(lp_then_rot - rot_then_lp).max() < 1e-9

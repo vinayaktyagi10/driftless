@@ -48,14 +48,14 @@ BLACKOUT_S = (10.0, 30.0, 60.0, 120.0)
 # speed initially, hand over to the absolute head as the fix ages. This is
 # precisely a Kalman gain responding to growing process covariance, which is the
 # argument for role 02 owning this in the EKF rather than a fixed blend.
-# Selected on val by --sweep-alpha over a (alpha_max, tau) grid. tau=20 s gives
-# the single best 30 s median (35.05 m vs 35.68 m) but tau=40 s dominates on four
-# of five metrics -- 10 s (8.64 vs 9.38 m), 60 s (68.5 vs 71.1), 120 s (147.8 vs
-# 151.1) and 30 s p90 (93.6 vs 101.9) -- for 0.6 m at 30 s. Short blackouts are
-# the common case and p90 is the worst-case a driver actually notices, so we take
-# the wider ramp.
+# Selected on val by --sweep-alpha over a (alpha_max, tau) grid, re-tuned after
+# mount-rotation augmentation changed the model. tau=20 s now wins the 30 s
+# target outright (33.01 m vs 33.81 m at tau=40) and also 60 s and 120 s, while
+# the 10 s gap that previously justified the wider ramp collapsed from 4.5 m to
+# 0.22 m. tau=40 keeps a slightly better 30 s p90 (110 vs 115 m); that is the one
+# thing given up here.
 ALPHA_MAX_DEFAULT = 1.0
-ALPHA_TAU_S_DEFAULT = 40.0
+ALPHA_TAU_S_DEFAULT = 20.0
 GYRO_VERT_IDX = FEATURE_CHANNELS.index("gyro_vert")
 
 # Palette: colour-blind safe, readable in print.
@@ -63,12 +63,14 @@ C_GT, C_MODEL, C_BASE, C_ORACLE = "#111111", "#0072B2", "#D55E00", "#009E73"
 
 
 def load_model(ckpt_path: Path, device: torch.device):
-    """Returns (model, context_len, output_interval_len)."""
+    """Returns (model, context_len, output_interval_len, channel_indices)."""
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     model = SpeedHeadingTCN(len(ck["channels"]), width=ck["width"]).to(device)
     model.load_state_dict(ck["state_dict"])
     model.eval()
-    return model, ck["win"], ck.get("out_win", ck["win"])
+    idx = ck.get("channel_indices")
+    return (model, ck["win"], ck.get("out_win", ck["win"]),
+            None if idx is None else np.asarray(idx))
 
 
 def longest_valid_span(valid: np.ndarray) -> tuple[int, int]:
@@ -91,7 +93,8 @@ def longest_valid_span(valid: np.ndarray) -> tuple[int, int]:
 
 def window_predictions(model, arrays: dict, win: int, out_win: int,
                        span: tuple[int, int], device: torch.device,
-                       batch: int = 512) -> dict:
+                       batch: int = 512, channels=None,
+                       rotation: np.ndarray | None = None) -> dict:
     """Tile the span with non-overlapping OUTPUT intervals of out_win samples.
 
     Each prediction is fed `win` samples of causal context ending at the close of
@@ -105,7 +108,14 @@ def window_predictions(model, arrays: dict, win: int, out_win: int,
     starts_out = ends - out_win
 
     feats = arrays["features"]
-    X = np.stack([feats[e - win:e].T for e in ends]).astype(np.float32)
+    X = np.stack([feats[e - win:e].T for e in ends]).astype(np.float64)
+    if rotation is not None:
+        # Simulate a differently-mounted phone: a fixed rotation for the run.
+        from .augment import rotate_batch
+        X = rotate_batch(X, rotation)
+    if channels is not None:
+        X = X[:, channels, :]
+    X = X.astype(np.float32)
 
     preds = []
     with torch.no_grad():
@@ -417,12 +427,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--alpha-max", type=float, default=ALPHA_MAX_DEFAULT)
     ap.add_argument("--tau", type=float, default=ALPHA_TAU_S_DEFAULT,
                     help="gain ramp time constant, s; <=0 for a constant gain")
+    ap.add_argument("--rotate-eval", type=int, default=None,
+                    help="apply a simulated mount rotation (seed) at eval, to "
+                         "measure how much the model leans on raw body axes")
+    ap.add_argument("--max-tilt-deg", type=float, default=60.0)
     ap.add_argument("--sweep-alpha", action="store_true",
                     help="sweep alpha on this split and exit (use --split val)")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
-    model, win, out_win = load_model(args.ckpt, device)
+    model, win, out_win, chan_idx = load_model(args.ckpt, device)
+    rotation = None
+    if args.rotate_eval is not None:
+        from .augment import tilt_rotation
+        rotation = tilt_rotation(np.random.default_rng(args.rotate_eval),
+                                 args.max_tilt_deg)
+        print(f"SIMULATED MOUNT ROTATION seed={args.rotate_eval} "
+              f"(tilt up to {args.max_tilt_deg:.0f} deg)")
 
     runs, _ = load_index(args.proc_dir)
     if args.split == "all":
@@ -450,7 +471,8 @@ def main(argv: list[str] | None = None) -> int:
             span = longest_valid_span(arrays["valid"])
             if span[1] - span[0] < win + out_win * 20:
                 continue
-            pr = window_predictions(model, arrays, win, out_win, span, device)
+            pr = window_predictions(model, arrays, win, out_win, span, device,
+                                    channels=chan_idx, rotation=rotation)
             if pr:
                 cache.append((pr, arrays))
         if not cache:
@@ -493,7 +515,8 @@ def main(argv: list[str] | None = None) -> int:
         if span[1] - span[0] < win + out_win * 20:
             print(f"  skip {run.run_id}: no usable span")
             continue
-        pred = window_predictions(model, arrays, win, out_win, span, device)
+        pred = window_predictions(model, arrays, win, out_win, span, device,
+                                  channels=chan_idx, rotation=rotation)
         if not pred:
             continue
 

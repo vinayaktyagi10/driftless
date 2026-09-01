@@ -3,6 +3,7 @@ numpy>=2.0
 pandas>=2.2
 matplotlib>=3.8
 torch>=2.4
+scipy>=1.13          # one-pole IIR for the causal gravity estimate
 tabulate>=0.9        # pandas .to_markdown() in the dataset audit
 
 # ONNX export for the C++ edge engine.

@@ -32,6 +32,15 @@ FEATURE_CHANNELS: tuple[str, ...] = IMU_CHANNELS + DERIVED_CHANNELS
 
 # Quality thresholds. Deliberately conservative: the label is GNSS, so a window
 # labelled from a bad fix teaches the model the wrong thing.
+# Gravity is tracked with a CAUSAL one-pole low-pass. The earlier version used
+# np.convolve(..., mode="same"), which is centred -- it averaged ~10 s of FUTURE
+# samples into the gravity estimate for the current row. That silently broke the
+# causality guarantee the rest of the pipeline is built on (a window ending now
+# must use only samples <= now), and it is not something a phone could reproduce
+# in real time. A one-pole EMA is what a handset would actually run.
+GRAVITY_TAU_S = 10.0
+GRAVITY_WARMUP_S = 30.0    # 3 time constants; the transient is not trained on
+
 MAX_DT_MS = 500.0          # a real sampling hole, not jitter
 MAX_GPS_ACCURACY_M = 10.0
 MIN_SATS_USED = 4
@@ -112,6 +121,32 @@ def _add_time(df: pd.DataFrame) -> pd.DataFrame:
 GYRO_XYZ_COLUMNS: tuple[str, str, str] = ("gyro_yaw", "gyro_roll", "gyro_pitch")
 
 
+def _causal_gravity(acc: np.ndarray, dt_s: float,
+                    tau_s: float = GRAVITY_TAU_S) -> np.ndarray:
+    """Causal one-pole low-pass of the accelerometer -> gravity direction.
+
+    y[n] = a*y[n-1] + (1-a)*x[n] with a = exp(-dt/tau), initialised so y[0]=x[0].
+
+    Being linear matters beyond causality: a fixed mount rotation R commutes with
+    this filter, so lowpass(R*acc) == R*lowpass(acc) exactly. That is what makes
+    the gravity-projected channels provably invariant to how the phone is mounted
+    (see augment.py), rather than approximately so.
+    """
+    from scipy.signal import lfilter
+
+    if not np.isfinite(dt_s) or dt_s <= 0:
+        dt_s = 0.1
+    a = float(np.exp(-dt_s / tau_s))
+    b, a_coef = [1.0 - a], [1.0, -a]
+    out = np.empty_like(acc, dtype=float)
+    for i in range(acc.shape[1]):
+        x = acc[:, i]
+        # zi chosen so the filter starts at the first sample instead of at zero,
+        # which would otherwise take ~tau to climb to 9.8 and corrupt the start.
+        out[:, i] = lfilter(b, a_coef, x, zi=np.array([x[0] * a]))[0]
+    return out
+
+
 def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     """Project the IMU onto the gravity frame to get attitude-invariant channels.
 
@@ -128,13 +163,9 @@ def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     gyr = df[list(GYRO_XYZ_COLUMNS)].to_numpy(dtype=float)
     grv = df[["grav_x", "grav_y", "grav_z"]].to_numpy(dtype=float)
 
-    # Low-pass the accelerometer over ~20 s to recover the gravity direction.
-    n = min(len(df), 201)
-    if n >= 5:
-        k = np.ones(n) / n
-        lp = np.stack([np.convolve(acc[:, i], k, mode="same") for i in range(3)],
-                      axis=1)
-    else:
+    lp = _causal_gravity(acc, dt_s=float(np.median(np.diff(df["t_s"].to_numpy()))
+                                         if len(df) > 1 else 0.1))
+    if not np.isfinite(lp).all():
         lp = grv
     g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
     # Where the estimate is degenerate, fall back to the reported gravity, then
@@ -214,8 +245,16 @@ def _add_validity(df: pd.DataFrame) -> pd.DataFrame:
     feat_ok = np.isfinite(df[list(FEATURE_CHANNELS)].to_numpy(dtype=float)).all(axis=1)
     dt_ok = ~df["gap"].to_numpy(dtype=bool)
 
+    # The gravity EMA needs ~3 time constants to settle; windows overlapping the
+    # transient would see a wrong vertical direction.
+    warmup = np.zeros(len(df), dtype=bool)
+    n_warm = int(GRAVITY_WARMUP_S / max(float(np.median(np.diff(
+        df["t_s"].to_numpy()))) if len(df) > 1 else 0.1, 1e-6))
+    warmup[:min(n_warm, len(df))] = True
+    df["gravity_warmup"] = warmup
+
     df["valid_gnss"] = acc_ok & sats_ok & speed_ok
-    df["valid_imu"] = feat_ok & dt_ok
+    df["valid_imu"] = feat_ok & dt_ok & ~warmup
     df["valid"] = df["valid_gnss"] & df["valid_imu"]
     return df
 

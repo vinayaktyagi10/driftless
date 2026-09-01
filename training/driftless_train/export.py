@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-tflite", action="store_true")
     args = ap.parse_args(argv)
 
-    model, win, out_win = load_model(args.ckpt, torch.device("cpu"))
+    model, win, out_win, chan_idx = load_model(args.ckpt, torch.device("cpu"))
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     n_ch = len(ck["channels"])
     args.out_dir.mkdir(parents=True, exist_ok=True)

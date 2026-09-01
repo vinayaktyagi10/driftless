@@ -84,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="drop TRAIN runs whose phone/vehicle coupling is below "
                          "this; val/test are already restricted to trusted runs")
     ap.add_argument("--tag", default="", help="suffix for checkpoint filenames")
+    ap.add_argument("--rotate-aug", action="store_true",
+                    help="augment training windows with random mount rotations")
+    ap.add_argument("--max-tilt-deg", type=float, default=60.0)
+    ap.add_argument("--invariant-only", action="store_true",
+                    help="train on the 5 gravity-projected, mount-invariant "
+                         "channels only")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny run for plumbing checks; ignores the split policy")
     args = ap.parse_args(argv)
@@ -107,10 +113,18 @@ def main(argv: list[str] | None = None) -> int:
                   "prepare more routes first")
             return 1
 
+    from .augment import invariant_channel_indices
+    chan_idx = invariant_channel_indices() if args.invariant_only else None
+    if chan_idx is not None:
+        channels = [channels[i] for i in chan_idx]
+        print(f"mount-invariant subset: {channels}")
+
     ds_tr = WindowDataset(parts["train"], win=args.win, stride=args.stride,
-                          out_win=args.out_win)
+                          out_win=args.out_win, rotate_aug=args.rotate_aug,
+                          max_tilt_deg=args.max_tilt_deg, channels=chan_idx)
+    # Validation is never augmented: we want a stable yardstick across epochs.
     ds_va = WindowDataset(parts["val"], win=args.win, stride=args.out_win,
-                          out_win=args.out_win)
+                          out_win=args.out_win, channels=chan_idx)
     print(f"windows: train {len(ds_tr)}  val {len(ds_va)}")
     if not len(ds_tr) or not len(ds_va):
         print("empty window set")
@@ -170,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
                 torch.save({"state_dict": model.state_dict(), "stats": stats,
                             "channels": channels, "win": args.win,
                             "out_win": args.out_win,
+                            "channel_indices": (None if chan_idx is None
+                                                else chan_idx.tolist()),
+                            "rotate_aug": args.rotate_aug,
                             "width": args.width, "epoch": ep},
                            MODEL_DIR / f"tcn_best{tag}.pt")
                 flag = " *"

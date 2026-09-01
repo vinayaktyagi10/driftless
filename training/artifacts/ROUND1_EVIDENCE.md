@@ -36,23 +36,23 @@ Plus 35 weakly-coupled train-only routes (14.29 h), not used by the reported mod
 
 Held-out **test** split, 1 run(s). Context 8.0 s, output interval 2.0 s. Blackout start points every 10 s across each run; each row aggregates all of them.
 
-- **model** — the regressor, with speed propagated from the last known fix and blended toward the absolute head (ramp τ = 40.0 s)
+- **model** — the regressor, with speed propagated from the last known fix and blended toward the absolute head (ramp τ = 20.0 s)
 - **abs-only** — the absolute speed head alone, no propagation
 - **baseline** — no ML: hold the last known speed, integrate the phone gyro for heading
 - **oracle** — integrate the *true* speed and yaw: the dead-reckoning floor
 
 | Blackout | n | model median (m) | model p90 (m) | model drift | abs-only (m) | baseline (m) | baseline drift | oracle (m) |
 |---|---|---|---|---|---|---|---|---|
-| 10 s | 491 | **7.7** | 19.4 | 11.1 % | 10.9 | 30.1 | 51.1 % | 1.4 |
-| 30 s | 510 | **33.9** | 75.8 | 15.9 % | 31.9 | 162.9 | 88.4 % | 4.6 |
-| 60 s | 511 | **69.7** | 149.8 | 16.1 % | 70.7 | 354.0 | 89.1 % | 11.9 |
-| 120 s | 505 | **125.5** | 370.3 | 15.2 % | 125.5 | 573.1 | 75.6 % | 28.9 |
+| 10 s | 489 | **8.6** | 21.2 | 12.0 % | 10.6 | 30.1 | 51.0 % | 1.4 |
+| 30 s | 507 | **31.4** | 70.4 | 15.2 % | 31.8 | 163.5 | 87.9 % | 4.6 |
+| 60 s | 508 | **57.5** | 146.4 | 15.1 % | 56.7 | 354.7 | 88.3 % | 11.9 |
+| 120 s | 502 | **117.6** | 331.0 | 13.9 % | 115.7 | 574.9 | 75.5 % | 29.0 |
 
 ### Per-window regression accuracy
 
-- Speed MAE **1.543 m/s**
-- Heading-change MAE **1.057°** per 2.0 s window
-- Same heading by raw gyro integration alone: **15.620°** — the learned head is 14.8× better
+- Speed MAE **1.544 m/s**
+- Heading-change MAE **1.070°** per 2.0 s window
+- Same heading by raw gyro integration alone: **15.708°** — the learned head is 14.7× better
 
 Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.
 
@@ -87,8 +87,8 @@ Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.
 ## 6. Deployment artefacts
 
 - **38,499 parameters**, input `[1, 14, 80]`, outputs `speed_ms, dpsi_rad, dv_ms` in SI units.
-- **ONNX** (C++ edge engine, roles 04–05): 123.4 KB, matches PyTorch to **2.09e-06** relative on real windows, **0.1147 ms/window** on CPU.
-- **TFLite** (Android app, role 01): 182.3 KB, matches PyTorch to **1.87e-06** relative.
+- **ONNX** (C++ edge engine, roles 04–05): 123.4 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1183 ms/window** on CPU.
+- **TFLite** (Android app, role 01): 182.3 KB, matches PyTorch to **1.51e-06** relative.
 
 Normalisation is baked into both graphs, so the phone and the C++ engine cannot disagree with training about scaling.
 

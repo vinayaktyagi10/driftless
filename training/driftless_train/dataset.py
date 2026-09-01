@@ -179,8 +179,18 @@ class WindowDataset(Dataset):
     """
 
     def __init__(self, runs: list[Run], win: int = WIN, stride: int = STRIDE_TRAIN,
-                 out_win: int = OUT_WIN, moving_only: bool = False):
+                 out_win: int = OUT_WIN, moving_only: bool = False,
+                 rotate_aug: bool = False, max_tilt_deg: float = 60.0,
+                 channels: np.ndarray | None = None, seed: int = 0):
         self.win, self.stride, self.out_win = win, stride, out_win
+        # Mount-rotation augmentation. Every IO-VNBD phone lay flat, so without
+        # this the raw body-frame channels have never seen a tilted handset --
+        # which is what a dashboard mount is. See augment.py for why this is
+        # exact rather than approximate.
+        self.rotate_aug = rotate_aug
+        self.max_tilt_deg = max_tilt_deg
+        self.channels = None if channels is None else np.asarray(channels)
+        self._rng = np.random.default_rng(seed)
         if out_win > win:
             raise ValueError("out_win cannot exceed the context length")
         self.arrays: dict[str, dict[str, np.ndarray]] = {}
@@ -231,7 +241,13 @@ class WindowDataset(Dataset):
         run_id, end = self.items[i]
         a = self.arrays[run_id]
         x = a["features"][end - self.win:end].T   # (C, W) causal context
-        return (torch.from_numpy(np.ascontiguousarray(x)),
+        if self.rotate_aug:
+            from .augment import rotate_window, tilt_rotation
+            x = rotate_window(x.astype(np.float64),
+                              tilt_rotation(self._rng, self.max_tilt_deg))
+        if self.channels is not None:
+            x = x[self.channels]
+        return (torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)),
                 torch.tensor(self.window_targets(a, end), dtype=torch.float32))
 
 

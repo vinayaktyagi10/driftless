@@ -139,6 +139,12 @@ Whether the extra data actually helps is a testable question, not an assumption 
 `train.py --min-coupling` runs it both ways. Trained identically and evaluated on
 the same rigidly-coupled held-out route:
 
+*Measured on the pre-augmentation model (centred gravity filter, no rotation
+augmentation), which is the configuration the comparison was run under. The
+absolute numbers are therefore superseded by the results table above; the
+comparison between the two rows is what this table is for, and that conclusion
+still stands.*
+
 | training data | speed MAE | Δψ MAE | 10 s | 30 s | 60 s | 120 s |
 |---|---|---|---|---|---|---|
 | **trusted only (9.7 h)** | **1.543 m/s** | **1.06°** | **7.7 m** | 33.9 m | 69.7 m | **125.6 m** |
@@ -230,10 +236,37 @@ That the optimum is time-varying rather than constant is the argument for role 0
 owning this in the EKF, where a Kalman gain responds to growing process
 covariance automatically instead of us hand-tuning τ.
 
+### Mount-rotation augmentation (on by default)
+
+Every phone in IO-VNBD lay flat — mean accelerometer direction ≈ (0, 0, 1) in all
+51 runs — while the product puts one in a dashboard mount at an arbitrary angle.
+Nine of the fourteen channels are raw body axes, so they go out of distribution
+the moment the phone is tilted. Measured on the held-out route, applying a
+simulated mount rotation (random azimuth, tilt up to 60°):
+
+| training | unrotated 30 s | rotated 30 s | degradation | 60 s |
+|---|---|---|---|---|
+| 14 ch, no augmentation | 33.8 m | **186.5 m** | **5.5×** (speed MAE 26.8×) | 70.0 m |
+| 5 invariant channels only | 37.5 m | 37.5 m | **1.000× — bit-identical** | 70.3 m |
+| **14 ch + rotation augmentation** | **32.8 m** | 33.3 m | **1.01×** | **59.1 m** |
+
+Untreated, the model is worse than the no-ML baseline once the phone is tilted.
+Augmentation removes that **and improves accuracy** — 60 s error fell 16 % — so it
+is the default (`train.py --rotate-aug`). The 5-channel invariant subset
+(`--invariant-only`) is kept as a fallback with a *provable* guarantee rather
+than an empirical one: the gravity-projected channels are exactly invariant
+because a fixed mount rotation commutes with the (linear) gravity filter. That
+identity is asserted on real data in `tests/test_augment.py`.
+
 Three further properties it is built to have:
 
 - **Causal.** A window ending now uses only samples ≤ now, because the phone
-  cannot see the future.
+  cannot see the future. This was briefly *not* true: gravity was estimated with
+  a centred `np.convolve(..., mode="same")`, which averaged ~10 s of future
+  samples into the current row. It is now a causal one-pole EMA — what a handset
+  could actually run — with the settling transient marked invalid so no window
+  trains on it. Two tests pin it, one textual and one behavioural (perturb a
+  future sample, assert earlier outputs are unchanged).
 - **Attitude-invariant inputs.** A dashboard-mounted phone sits at an arbitrary
   angle, so alongside the 9 raw channels we feed 5 derived ones computed by
   projecting onto the measured gravity direction: `acc_norm`, `acc_vert`,
@@ -366,3 +399,44 @@ python export/to_tflite.py --copy-to-consumers
 # tcn_speed_heading.tflite -> android/app/src/main/assets/models/
 # tcn_speed_heading.onnx    -> edge-engine/models/
 ```
+
+## Handover artefacts for role 02 (fusion)
+
+`artifacts/metrics/measurement_noise.md` derives the filter's measurement noise
+from held-out residuals, in the terms the UKF reasons about:
+
+- Forward-speed measurement: **σ = 2.20 m/s**, with a **+0.49 m/s systematic
+  bias** on the held-out route, and a per-speed-band table because the error
+  scales with speed.
+- Heading change: **σ = 1.45°** per 2 s.
+- **The correlation warning.** Consecutive predictions share most of their 8 s
+  context, so the residuals are not independent: speed lag-1 autocorrelation
+  **0.74**, decorrelation time **8 s** — exactly the context length. Feeding one
+  measurement every 2 s as if independent over-informs the filter by about
+  **2×** in σ. This is the same trap `ukf_fusion_engine.h` already documents for
+  the non-holonomic constraint, where an over-tight σ at high rate collapsed the
+  attitude covariance and made the filter reject 21 honest GNSS fixes after a
+  blackout.
+
+The measurement is the **longitudinal** body-velocity component — the one axis
+the non-holonomic constraint deliberately leaves free — so it fits the existing
+`updateUnscented` path with no new filter code. The file contains the snippet.
+
+## IMU noise characterisation
+
+`artifacts/metrics/allan_imu_noise.md` addresses the handset half of the TODO in
+`edge-engine/include/driftless/imu_noise.h` (*"fit from Allan deviation once
+IO-VNBD / FOG logs are in hand"*), using overlapping Allan deviation over
+**4,864 s** of stationary data in 106 spans.
+
+Two of the four parameters turned out **not to be identifiable** from this data,
+and the module refuses to report them rather than returning a number: in the
+10–60 s window where bias instability should make the curve rise at +½, it is
+still falling at ≈ −½ on every axis, so the bias-instability floor is never
+reached within the available spans. The gyro white-noise fit is also contaminated
+— its Allan deviation is flat-to-rising at short τ, the signature of a periodic
+disturbance, because the vehicle is stopped but the engine is idling.
+
+The fix is a capture nobody has taken yet: phone flat on a desk, **engine off**,
+10 minutes at `SENSOR_DELAY_FASTEST`. Then all four parameters become
+identifiable. That is a ten-minute role 01 task.
