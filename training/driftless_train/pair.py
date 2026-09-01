@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .geo import latlon_to_enu, wrap_pi
+from .geo import latlon_to_enu
 from .schema import load_raw_csv, load_v_csv
 
 # Alignment search settings.
@@ -105,7 +105,8 @@ def split_v_runs(v: pd.DataFrame, min_rows: int = 600) -> list[pd.DataFrame]:
     cuts = np.flatnonzero((dt < 0) | (dt > 5.0)) + 1
     bounds = np.r_[0, cuts, len(v)]
     return [v.iloc[a:b].copy().reset_index(drop=True)
-            for a, b in zip(bounds[:-1], bounds[1:]) if b - a >= min_rows]
+            for a, b in zip(bounds[:-1], bounds[1:], strict=True)
+            if b - a >= min_rows]
 
 
 def _smooth(x: np.ndarray, n: int = SMOOTH_N) -> np.ndarray:

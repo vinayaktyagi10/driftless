@@ -104,7 +104,36 @@
     "independent_sampling_inflation": 1.0
   },
   "dv": {
-    "sigma_mps": 0.8733
+    "sigma_mps": 0.8471,
+    "bias_mps": -0.0053,
+    "mae_mps": 0.5609,
+    "definition": "v[end-1] - v[start] within the output interval, matching dataset.window_targets",
+    "correlation": {
+      "lag1": 0.1641,
+      "decorrelation_s": 2.0,
+      "acf": [
+        0.1641,
+        0.0845,
+        0.005,
+        0.0194,
+        0.0374,
+        0.0404,
+        0.0205,
+        -0.0019,
+        -0.0199,
+        -0.0373,
+        -0.0242,
+        -0.0522,
+        -0.0229,
+        -0.0052,
+        0.0101,
+        -0.0062,
+        0.0116,
+        -0.0516,
+        -0.0319,
+        0.0038
+      ]
+    }
   },
   "per_run": [
     {

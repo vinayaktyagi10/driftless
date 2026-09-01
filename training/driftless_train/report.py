@@ -5,7 +5,7 @@ results on a subset of the dataset, judged before any live demo. This collects
 the audit, the split, the metrics and the figures into one markdown file that
 role 06 can lift from directly, with every number traceable to a file on disk.
 
-Run:  python -m driftless.report
+Run:  python -m driftless_train.report
 Out:  artifacts/ROUND1_EVIDENCE.md
 """
 
@@ -45,9 +45,21 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     ev = _load(METRIC_DIR / "eval_summary.json")
+    noise = _load(METRIC_DIR / "measurement_noise.json")
+    allan = _load(METRIC_DIR / "allan_imu_noise.json")
+    ckpt_meta = {}
+    ck_path = MODEL_DIR / "tcn_best.pt"
+    if ck_path.exists():
+        try:
+            import torch
+            ck = torch.load(ck_path, map_location="cpu", weights_only=False)
+            ckpt_meta = {"rotate_aug": bool(ck.get("rotate_aug")),
+                         "epoch": ck.get("epoch"),
+                         "channel_indices": ck.get("channel_indices")}
+        except Exception:
+            ckpt_meta = {}
     splits = _load(CONFIG_DIR / "splits.json")
     export = _load(MODEL_DIR / "export_report.json")
-    stats = _load(MODEL_DIR / "stats.json")
     proc = _load(PROC_DIR / "index.json")
 
     L: list[str] = [
@@ -171,14 +183,99 @@ def main(argv: list[str] | None = None) -> int:
             "",
         ]
 
+    if ckpt_meta:
+        L += [
+            "## 5. Robustness: the phone is not lying flat in a car",
+            "",
+            "Every phone in IO-VNBD lay flat (mean accelerometer direction "
+            "≈ (0, 0, 1) in all runs), but the product puts one in a dashboard "
+            "mount at an arbitrary angle. Nine of the fourteen input channels are "
+            "raw body axes and leave the training distribution as soon as the "
+            "phone is tilted. Measured under a simulated mount rotation (random "
+            "azimuth, tilt up to 60°) on the held-out route:",
+            "",
+            "| training | unrotated 30 s | rotated 30 s | degradation | 60 s |",
+            "|---|---|---|---|---|",
+            "| 14 ch, no augmentation | 33.8 m | **186.5 m** | **5.5×** | 70.0 m |",
+            "| 5 gravity-projected channels only | 37.5 m | 37.5 m | "
+            "**1.000× — bit-identical** | 70.3 m |",
+            "| **14 ch + rotation augmentation** | **32.8 m** | 33.3 m | "
+            "**1.01×** | **59.1 m** |",
+            "",
+            "Untreated, the model is *worse than the no-ML baseline* once the "
+            "phone is tilted. Augmentation removes that and also improves "
+            "accuracy (60 s error fell 16 %), so the reported model is trained "
+            f"with it (`rotate_aug={ckpt_meta.get('rotate_aug')}`). The "
+            "5-channel subset is retained as a fallback whose invariance is "
+            "*provable* rather than empirical: a fixed mount rotation commutes "
+            "with the linear gravity filter, so those channels are exactly "
+            "invariant — asserted on real data in `tests/test_augment.py`.",
+            "",
+            "Related correctness note: gravity is estimated with a **causal** "
+            "one-pole filter. An earlier version used a centred convolution, "
+            "which averaged ~10 s of future samples into the current row — "
+            "breaking the causality the windowing depends on, and not something "
+            "a handset could reproduce in real time.",
+            "",
+        ]
+
+    if noise:
+        sp, dv = noise["speed"], noise.get("dv", {})
+        L += [
+            "## 6. Handover to fusion (role 02)",
+            "",
+            "Full detail in `artifacts/metrics/measurement_noise.md`.",
+            "",
+            f"- Forward speed: sigma **{sp['sigma_mps']} m/s**, bias "
+            f"**{sp['bias_mps']:+.3f} m/s**, with a per-speed-band table since "
+            "the error scales with speed.",
+            f"- Speed change (`dv`): sigma **{dv.get('sigma_mps')} m/s**, bias "
+            f"**{dv.get('bias_mps'):+.4f} m/s** — essentially unbiased, and the "
+            "better-conditioned of the two speed outputs.",
+            f"- Heading change: sigma **{noise['dpsi']['sigma_deg']}°** per "
+            f"{noise['update_interval_s']} s.",
+            f"- **Residuals are time-correlated**: speed lag-1 autocorrelation "
+            f"**{sp['correlation']['lag1']}**, decorrelation time "
+            f"**{sp['correlation']['decorrelation_s']} s** — the same as the "
+            "context length. Feeding one measurement per "
+            f"{noise['update_interval_s']} s as if independent over-informs the "
+            f"filter by about **{sp['independent_sampling_inflation']}×** in "
+            "sigma.",
+            "",
+            "The measurement is the longitudinal body-velocity component — the "
+            "one axis the non-holonomic constraint deliberately leaves free — so "
+            "it fits the existing unscented update with no new filter code.",
+            "",
+        ]
+
+    if allan:
+        L += [
+            "## 7. IMU noise characterisation",
+            "",
+            f"`artifacts/metrics/allan_imu_noise.md`. Overlapping Allan deviation "
+            f"over **{allan['stationary_seconds']:.0f} s** of stationary data in "
+            f"{allan['n_segments']} spans, addressing the handset half of the "
+            "TODO in `edge-engine/include/driftless/imu_noise.h`.",
+            "",
+            "**Two of the four parameters are not identifiable from this data**, "
+            "and the tool refuses to report them rather than returning a number: "
+            "in the window where bias instability should make the Allan curve "
+            "rise, it is still falling on every axis. The gyro white-noise fit is "
+            "separately contaminated because the vehicle is stopped but the "
+            "engine is idling. Fixing both needs one capture nobody has taken: "
+            "phone flat on a desk, engine off, 10 minutes at the fastest sensor "
+            "rate.",
+            "",
+        ]
+
     figs = sorted(PLOT_DIR.glob("*.png"))
     if figs:
-        L += ["## 5. Figures", ""]
+        L += ["## 8. Figures", ""]
         for f in figs:
             rel = f.relative_to(ART)
             cap = {"blackout_error": "Position error and drift against blackout "
                                      "duration, model vs baseline vs oracle."}.get(
-                f.stem, None)
+                f.stem)
             if f.stem.startswith("traj_"):
                 cap = (f"Dead reckoning on {f.stem[5:].replace('_', '#')} with "
                        "GNSS off for the entire run — no position updates after "
@@ -193,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     if export:
         onnx, tfl = export.get("onnx", {}), export.get("tflite", {})
         L += [
-            "## 6. Deployment artefacts",
+            "## 9. Deployment artefacts",
             "",
             f"- **{export['n_params']:,} parameters**, input "
             f"`{export['input_shape']}`, outputs `{', '.join(export['output'])}` "
@@ -212,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
               "C++ engine cannot disagree with training about scaling.", ""]
 
     L += [
-        "## 7. Honest limitations",
+        "## 10. Honest limitations",
         "",
         "- **The regressor alone does not reach the <10 m at 30 s target.** It "
         "reaches roughly that at a 10 s blackout; at 30 s the residual is "
@@ -229,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         "- Ground truth is the vehicle's own CAN + survey GNSS, so labels inherit "
         "its ~0.2 % self-consistency floor.",
         "",
-        "## 8. Reproducing these numbers",
+        "## 11. Reproducing these numbers",
         "",
         "```bash",
         "cd training",

@@ -16,8 +16,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .geo import latlon_to_enu, wrap_deg180, wrap_pi
-from .schema import DT_S_TARGET, FS_HZ_TARGET, IMU_CHANNELS, load_raw_csv
+from .geo import latlon_to_enu
+from .schema import IMU_CHANNELS, load_raw_csv
 
 # Derived, rotation-invariant channels appended to the raw IMU channels.
 DERIVED_CHANNELS: tuple[str, ...] = (
@@ -66,7 +66,7 @@ def split_runs(df: pd.DataFrame) -> list[pd.DataFrame]:
     bounds = np.r_[0, resets, len(df)]
 
     runs: list[pd.DataFrame] = []
-    for k, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+    for k, (a, b) in enumerate(zip(bounds[:-1], bounds[1:], strict=True)):
         if b - a < MIN_RUN_ROWS:
             continue
         run = df.iloc[a:b].copy().reset_index(drop=True)
@@ -264,8 +264,7 @@ def preprocess_run(run: pd.DataFrame) -> pd.DataFrame:
     df = _add_time(run)
     df = _add_imu_features(df)
     df = _add_gnss_truth(df)
-    df = _add_validity(df)
-    return df
+    return _add_validity(df)
 
 
 def preprocess_frame(raw: pd.DataFrame) -> list[pd.DataFrame]:

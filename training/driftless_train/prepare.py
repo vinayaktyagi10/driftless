@@ -4,7 +4,7 @@ Stores per-SAMPLE features and targets rather than pre-cut windows, so window
 length and stride stay free parameters at training time instead of being baked
 into a regenerated 300 MB dataset every time we change our mind.
 
-Run:  python -m driftless.prepare
+Run:  python -m driftless_train.prepare
 Out:  data/processed/<run_id>.npz   +   data/processed/index.json
 """
 
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         want = set(args.routes)
         routes = [r for r in routes if r[0] in want or r[0].split("/")[-1] in want]
     if not routes:
-        print("no complete S+V pairs on disk yet; run `python -m driftless.download`")
+        print("no complete S+V pairs on disk yet; run `python -m driftless_train.download`")
         return 1
 
     args.out_dir.mkdir(parents=True, exist_ok=True)

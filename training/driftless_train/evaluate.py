@@ -11,7 +11,7 @@ start points across held-out routes, against three references:
            heading -- what you get without the learned component
   model    the TCN's predicted speed and heading change
 
-Run:  python -m driftless.evaluate
+Run:  python -m driftless_train.evaluate
 Out:  artifacts/metrics/eval_*.csv, artifacts/plots/*.png
 """
 
@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from .dataset import DT, PROC_DIR, WindowDataset, load_index, make_splits, split_runs
+from .dataset import DT, PROC_DIR, load_index, make_splits, split_runs
 from .model import SpeedHeadingTCN
 from .preprocess import FEATURE_CHANNELS
 
@@ -315,7 +315,8 @@ def plot_blackout_segments(pred: dict, arrays: dict, run_id: str, out: Path,
     fig, axes = plt.subplots(rows_n, cols, figsize=(4.0 * cols, 3.8 * rows_n))
     axes = np.atleast_1d(axes).ravel()
 
-    for ax, k0 in zip(axes, picks):
+    # axes is padded to a full grid, so it is deliberately longer than picks.
+    for ax, k0 in zip(axes, picks, strict=False):
         i0, iend = starts[k0], starts[k0 + k]
         psi0, e0, n0 = head[i0], e_gt[i0], n_gt[i0]
         sl = slice(k0, k0 + k)
@@ -580,7 +581,10 @@ def main(argv: list[str] | None = None) -> int:
         sub = [r for r in all_rows if r["duration_s"] == T]
         if not sub:
             continue
-        g = lambda k, f=np.median: float(f([r[k] for r in sub]))
+        # `sub` is bound as a default rather than captured: closing over a
+        # loop variable is a bug waiting for someone to defer the call.
+        def g(k, f=np.median, sub=sub):
+            return float(f([r[k] for r in sub]))
         row = {
             "duration_s": T, "n": len(sub),
             "model_err_med_m": round(g("model_err_m"), 2),

@@ -145,7 +145,7 @@ def make_splits(runs: list[Run], out: Path = SPLITS_PATH,
                   f"{TRUSTED_COUPLING_CORR} are TRAIN-ONLY -- never evaluated on. "
                   "Frozen on first generation.",
         "weak_coupling_train_only": sorted(weak),
-        "targets": dict(zip(names, targets)),
+        "targets": dict(zip(names, targets, strict=True)),
         "achieved_duration_frac_of_trusted": {k: round(got[k] / total, 4)
                                               for k in names},
         "trusted_duration_s": {k: round(got[k], 1) for k in names},

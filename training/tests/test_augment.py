@@ -65,13 +65,11 @@ def test_rotate_batch_matches_rotate_window():
         assert np.allclose(got[i], rotate_window(X[i], R), atol=1e-12)
 
 
-def test_derived_channels_are_invariant_on_real_data(processed_runs):
+def test_derived_channels_are_invariant_on_real_data():
     """The real claim: rotate a whole recorded run's raw signal, recompute the
     derived channels through the actual preprocessing, and they must come back
     identical -- because the gravity filter is linear and commutes with R.
     """
-    import pandas as pd
-
     from driftless_train.preprocess import _add_imu_features
     from driftless_train.schema import load_raw_csv
     from driftless_train.paths import RAW_DIR

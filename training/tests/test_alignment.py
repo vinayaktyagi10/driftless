@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from driftless_train.pair import (MIN_ALIGN_CORR, Alignment, estimate_alignment,
+from driftless_train.pair import (MIN_ALIGN_CORR, estimate_alignment,
                             sod_from_date, split_v_runs)
 
 

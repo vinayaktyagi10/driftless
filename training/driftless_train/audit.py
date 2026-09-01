@@ -5,7 +5,7 @@ sampling rate; the files disagree with it and with each other. Training on the
 set as if it were homogeneous would quietly mix 20 Hz and 10 Hz sequences, and
 label 10-second GNSS intervals as if they were 100 ms ones.
 
-Run:  python -m driftless.audit
+Run:  python -m driftless_train.audit
 Out:  artifacts/metrics/dataset_audit.csv  +  dataset_audit.md
 """
 
@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .geo import latlon_to_enu
 from .pair import TRUSTED_COUPLING_CORR
 from .preprocess import preprocess_frame, preprocess_report
 from .schema import load_raw_csv
@@ -173,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     # same directory and have a different 29-column schema.
     files = sorted(args.raw_dir.glob("S-*.csv"))
     if not files:
-        print(f"no S-*.csv in {args.raw_dir}; run `python -m driftless.download` first")
+        print(f"no S-*.csv in {args.raw_dir}; run `python -m driftless_train.download` first")
         return 1
 
     rows = []

@@ -1,6 +1,6 @@
 """Train the speed & heading-change regressor.
 
-Run:  python -m driftless.train --epochs 30
+Run:  python -m driftless_train.train --epochs 30
 Out:  artifacts/models/tcn_best.pt, artifacts/models/stats.json,
       artifacts/metrics/train_log.csv
 """
@@ -106,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
         splits = make_splits(runs)
         parts = split_runs(runs, splits, min_coupling=args.min_coupling)
         for k, v in parts.items():
-            hrs = sum(1 for _ in v)
             print(f"  {k:5} {len(v):3d} runs")
         if not parts["train"] or not parts["val"]:
             print("\nnot enough routes for a real split yet -- use --smoke, or "

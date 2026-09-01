@@ -15,6 +15,13 @@ Error scales with speed, so a single sigma is wrong across the range:
 | 10-15 m/s | 700 | 2.5277 | -0.154 | 20.7 % |
 | 15-25 m/s | 78 | 2.4831 | -2.5161 | 15.2 % |
 
+## Speed-change (`dv`) measurement
+
+- sigma **0.8471 m/s**, bias -0.0053 m/s, MAE 0.5609 m/s over 2.0 s
+- decorrelation time 2.0 s (lag-1 0.1641)
+
+Definition: `v[end-1] - v[start] within the output interval, matching dataset.window_targets`. This is the better-conditioned of the two speed outputs and is what a blackout should propagate from, since it starts from a known speed.
+
 ## Heading-change measurement
 
 - sigma **1.4537°** (0.025373 rad) per 2.0 s, bias 0.1965°

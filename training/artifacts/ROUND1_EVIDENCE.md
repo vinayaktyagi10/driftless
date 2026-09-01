@@ -56,7 +56,38 @@ Held-out **test** split, 1 run(s). Context 8.0 s, output interval 2.0 s. Blackou
 
 Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.
 
-## 5. Figures
+## 5. Robustness: the phone is not lying flat in a car
+
+Every phone in IO-VNBD lay flat (mean accelerometer direction ≈ (0, 0, 1) in all runs), but the product puts one in a dashboard mount at an arbitrary angle. Nine of the fourteen input channels are raw body axes and leave the training distribution as soon as the phone is tilted. Measured under a simulated mount rotation (random azimuth, tilt up to 60°) on the held-out route:
+
+| training | unrotated 30 s | rotated 30 s | degradation | 60 s |
+|---|---|---|---|---|
+| 14 ch, no augmentation | 33.8 m | **186.5 m** | **5.5×** | 70.0 m |
+| 5 gravity-projected channels only | 37.5 m | 37.5 m | **1.000× — bit-identical** | 70.3 m |
+| **14 ch + rotation augmentation** | **32.8 m** | 33.3 m | **1.01×** | **59.1 m** |
+
+Untreated, the model is *worse than the no-ML baseline* once the phone is tilted. Augmentation removes that and also improves accuracy (60 s error fell 16 %), so the reported model is trained with it (`rotate_aug=True`). The 5-channel subset is retained as a fallback whose invariance is *provable* rather than empirical: a fixed mount rotation commutes with the linear gravity filter, so those channels are exactly invariant — asserted on real data in `tests/test_augment.py`.
+
+Related correctness note: gravity is estimated with a **causal** one-pole filter. An earlier version used a centred convolution, which averaged ~10 s of future samples into the current row — breaking the causality the windowing depends on, and not something a handset could reproduce in real time.
+
+## 6. Handover to fusion (role 02)
+
+Full detail in `artifacts/metrics/measurement_noise.md`.
+
+- Forward speed: sigma **2.2046 m/s**, bias **+0.485 m/s**, with a per-speed-band table since the error scales with speed.
+- Speed change (`dv`): sigma **0.8471 m/s**, bias **-0.0053 m/s** — essentially unbiased, and the better-conditioned of the two speed outputs.
+- Heading change: sigma **1.4537°** per 2.0 s.
+- **Residuals are time-correlated**: speed lag-1 autocorrelation **0.7367**, decorrelation time **8.0 s** — the same as the context length. Feeding one measurement per 2.0 s as if independent over-informs the filter by about **2.0×** in sigma.
+
+The measurement is the longitudinal body-velocity component — the one axis the non-holonomic constraint deliberately leaves free — so it fits the existing unscented update with no new filter code.
+
+## 7. IMU noise characterisation
+
+`artifacts/metrics/allan_imu_noise.md`. Overlapping Allan deviation over **4864 s** of stationary data in 106 spans, addressing the handset half of the TODO in `edge-engine/include/driftless/imu_noise.h`.
+
+**Two of the four parameters are not identifiable from this data**, and the tool refuses to report them rather than returning a number: in the window where bias instability should make the Allan curve rise, it is still falling on every axis. The gyro white-noise fit is separately contaminated because the vehicle is stopped but the engine is idling. Fixing both needs one capture nobody has taken: phone flat on a desk, engine off, 10 minutes at the fastest sensor rate.
+
+## 8. Figures
 
 ### `plots/blackout_error.png`
 
@@ -84,22 +115,22 @@ Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.
 
 *Dead reckoning on S-S1#0 with GNSS off for the entire run — no position updates after the start point.*
 
-## 6. Deployment artefacts
+## 9. Deployment artefacts
 
 - **38,499 parameters**, input `[1, 14, 80]`, outputs `speed_ms, dpsi_rad, dv_ms` in SI units.
-- **ONNX** (C++ edge engine, roles 04–05): 123.4 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1183 ms/window** on CPU.
+- **ONNX** (C++ edge engine, roles 04–05): 123.4 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1206 ms/window** on CPU.
 - **TFLite** (Android app, role 01): 182.3 KB, matches PyTorch to **1.51e-06** relative.
 
 Normalisation is baked into both graphs, so the phone and the C++ engine cannot disagree with training about scaling.
 
-## 7. Honest limitations
+## 10. Honest limitations
 
 - **The regressor alone does not reach the <10 m at 30 s target.** It reaches roughly that at a 10 s blackout; at 30 s the residual is dominated by absolute-speed error, which is the fundamentally hard part of inertial-only odometry. Closing the rest is what the road-network constraint (map matching) and the EKF in role 02 are for — a vehicle on a known road cannot be anywhere the map does not allow.
 - Trained on IO-VNBD: UK/France/Nigeria, one phone, one vehicle. Indian roads and other handsets are the fine-tuning step the roadmap already sequences (pre-train public → fine-tune own captures).
 - IO-VNBD phone data is 10 Hz; our own captures target 100 Hz. The window is defined in seconds, so the design carries over — but it needs retraining, not just reuse.
 - Ground truth is the vehicle's own CAN + survey GNSS, so labels inherit its ~0.2 % self-consistency floor.
 
-## 8. Reproducing these numbers
+## 11. Reproducing these numbers
 
 ```bash
 cd training

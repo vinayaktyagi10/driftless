@@ -8,7 +8,7 @@ Normalisation lives inside the graph, so neither consumer has to reimplement it.
 Every export is checked numerically against PyTorch before it is accepted -- a
 silently wrong export is worse than a missing one, because it fails on stage.
 
-Run:  python -m driftless.export
+Run:  python -m driftless_train.export
 """
 
 from __future__ import annotations

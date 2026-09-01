@@ -6,6 +6,7 @@
 *.ckpt
 *.pt
 *.onnx
+*.onnx.data
 *.tflite
 
 # ...but DO track the exported models role 01 and roles 04-05 consume, so nobody

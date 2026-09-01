@@ -6,7 +6,6 @@ pipeline. They are cheap and they protect numbers that appear in the report.
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from driftless_train import schema
 from driftless_train.geo import latlon_to_enu, wrap_pi

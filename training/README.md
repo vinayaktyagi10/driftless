@@ -111,13 +111,21 @@ Each drive has two sides, and in the *Synchronised* set they share a clock:
 ### The dataset's biggest limitation for our purpose
 
 With the gyro axis corrected, phone/vehicle coupling — how well the phone's own
-gyro tracks the car's measured yaw rate — splits cleanly **by driver, not by
-route**:
+gyro tracks the car's measured yaw rate — tracks **the driver, not the route**:
 
-| driver | families | routes | coupling | phone accel noise (\|acc\| std) |
-|---|---|---|---|---|
-| A, B, D | S, M, Y | 8 | **0.96 – 1.00** | 0.52 – 0.78 |
-| E | Vta, Vtb, Vw, Vf | 64 | **0.22 – 0.61** | 0.81 – 1.07 |
+| driver | families | routes | runs | runs ≥ 0.70 | coupling range | hours |
+|---|---|---|---|---|---|---|
+| A | S | 6 | 9 | **9 / 9** | 0.76 – 1.00 | 8.48 |
+| B | M | 1 | 2 | **2 / 2** | 0.99 – 1.00 | 2.94 |
+| D | Y | 1 | 1 | **1 / 1** | 0.96 | 1.86 |
+| E | Vta, Vtb, Vw, Vf | 64 | 39 | **4 / 39** | 0.21 – 0.89 | 14.68 |
+
+It is a strong association, **not a clean partition** — and an earlier version of
+this file overstated it as one. Every A/B/D run is well coupled (the weakest is
+0.76), and 35 of driver E's 39 runs fall below the 0.70 threshold. But four short
+driver-E runs do pass, scoring 0.74–0.89 and totalling 0.38 h, so they sit in the
+trusted pool alongside A/B/D. Phone accelerometer noise (|acc| std) is 0.52–0.78
+for A/B/D against 0.81–1.07 for driver E.
 
 Driver E's phone is flat like the others (mean accelerometer direction ≈
 (0, 0, 1), so no tilt to correct for), and a wide ±300 s lag search finds no
@@ -193,7 +201,7 @@ a real car.
 ## Model
 
 A small **dilated causal TCN**: 14 input channels × **80 samples (8 s of context
-at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.110 ms/window**
+at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.118 ms/window**
 (ONNX) and **0.067 ms/window** (TFLite) on laptop CPU. Receptive field 63
 samples, covering the context.
 
@@ -278,6 +286,24 @@ Three further properties it is built to have:
   are constant buffers *inside* the graph, so the phone and the C++ engine have
   nothing to reimplement and cannot disagree with training about scaling.
 
+## Results
+
+Held-out route, median position error after a GNSS blackout, aggregated over
+489–508 blackout start points per duration:
+
+| Blackout | Driftless | p90 | Drift | Baseline (no ML) | Oracle floor |
+|---|---|---|---|---|---|
+| **10 s** | **8.6 m** | 21.2 m | 12.0 % | 30.2 m | 1.4 m |
+| **30 s** | **31.4 m** | 70.4 m | 15.2 % | 163.5 m | 4.6 m |
+| **60 s** | **57.6 m** | 146.4 m | 15.1 % | 354.7 m | 11.9 m |
+| **120 s** | **117.6 m** | 331.0 m | 13.9 % | 574.9 m | 29.0 m |
+
+Per-window: speed MAE **1.544 m/s**, heading MAE **1.07°** — against **15.71°**
+for raw gyro integration, i.e. **14.7× better**.
+
+Regenerate with `python -m driftless_train.evaluate --split test`; the numbers
+above come from `artifacts/metrics/eval_summary.json`.
+
 ## Evaluation: the question a judge will ask
 
 Not window-level regression error — **position error after a GNSS blackout of a
@@ -298,8 +324,8 @@ memorise a road instead of learning vehicle dynamics.
 
 | | Size | Parity vs PyTorch | Latency | Input |
 |---|---|---|---|---|
-| **ONNX** (C++ edge engine) | 120.6 KB | 9.7e-7 rel | 0.118 ms/window | `[1, 14, 80]` **NCW** |
-| **TFLite** (Android app) | 182.3 KB | 1.09e-6 rel | 0.067 ms/window | `[1, 80, 14]` **NWC** |
+| **ONNX** (C++ edge engine) | 123.4 KB (+150 KB `.onnx.data`) | 2.3e-6 rel | 0.118 ms/window | `[1, 14, 80]` **NCW** |
+| **TFLite** (Android app) | 182.3 KB | 1.5e-6 rel | 0.067 ms/window | `[1, 80, 14]` **NWC** |
 
 Note the layouts differ — TFLite is channels-last (time-major), which is the
 natural layout for an Android ring buffer anyway. Parity is asserted numerically

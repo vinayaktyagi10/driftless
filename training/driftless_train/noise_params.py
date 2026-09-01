@@ -86,8 +86,14 @@ def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
         sp_res.append(rs)
         dp_res.append(rd)
         sp_true.append(pr["true_speed"])
-        # dv residual needs the true speed change over each interval.
-        dv_true = np.diff(pr["true_speed"], prepend=pr["true_speed"][0])
+        # dv must use the SAME definition as the training target
+        # (dataset.window_targets): the speed change WITHIN the output interval,
+        # v[end-1] - v[start]. Differencing consecutive window MEANS instead --
+        # which an earlier version of this file did -- measures a different
+        # quantity and reports a residual the model was never trained against.
+        v_all = arrays["speed_ms"].astype(float)
+        dv_true = np.array([v_all[st + out_win - 1] - v_all[st]
+                            for st in pr["starts"]])
         dv_res.append(pr["pred_dv"] - dv_true)
         per_run.append({
             "run_id": run.run_id,
@@ -152,6 +158,11 @@ def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
         },
         "dv": {
             "sigma_mps": round(float(np.concatenate(dv_res).std()), 4),
+            "bias_mps": round(float(np.concatenate(dv_res).mean()), 4),
+            "mae_mps": round(float(np.abs(np.concatenate(dv_res)).mean()), 4),
+            "definition": "v[end-1] - v[start] within the output interval, "
+                          "matching dataset.window_targets",
+            "correlation": _decorrelation(np.concatenate(dv_res), win_dt),
         },
         "per_run": per_run,
     }
@@ -183,6 +194,19 @@ def write_markdown(res: dict, path) -> None:
                  f"{100*b['sigma_frac_of_speed']:.1f} % |")
 
     L += [
+        "",
+        "## Speed-change (`dv`) measurement",
+        "",
+        f"- sigma **{res['dv']['sigma_mps']} m/s**, bias "
+        f"{res['dv']['bias_mps']} m/s, MAE {res['dv']['mae_mps']} m/s over "
+        f"{res['update_interval_s']} s",
+        f"- decorrelation time "
+        f"{res['dv']['correlation']['decorrelation_s']} s "
+        f"(lag-1 {res['dv']['correlation']['lag1']})",
+        "",
+        f"Definition: `{res['dv']['definition']}`. This is the better-conditioned "
+        "of the two speed outputs and is what a blackout should propagate from, "
+        "since it starts from a known speed.",
         "",
         "## Heading-change measurement",
         "",

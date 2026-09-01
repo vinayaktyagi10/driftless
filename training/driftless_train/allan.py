@@ -183,7 +183,7 @@ def characterise(dt: float = 0.1) -> dict:
     ):
         per_axis_n, per_axis_k = [], []
         curves = {}
-        for axis, name in zip("xyz", names):
+        for axis, name in zip("xyz", names, strict=True):
             # Average the Allan variance across segments at each tau, weighting
             # by segment length -- concatenating the segments would inject a
             # step discontinuity at every join.
@@ -192,7 +192,7 @@ def characterise(dt: float = 0.1) -> dict:
                 x = seg[:, ch[name]].astype(float)
                 x = x - x.mean()            # a constant bias is not noise
                 t, s = overlapping_allan(x, dt, taus)
-                for ti, si in zip(t, s):
+                for ti, si in zip(t, s, strict=True):
                     acc_num.setdefault(float(ti), []).append(si * si)
             if not acc_num:
                 continue
