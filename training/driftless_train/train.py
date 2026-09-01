@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +19,18 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from .dataset import (OUT_WIN, PROC_DIR, STRIDE_TRAIN, WIN, WindowDataset,
-                      compute_stats, load_index, make_splits, split_runs)
+from .dataset import (
+    OUT_WIN,
+    PROC_DIR,
+    STRIDE_TRAIN,
+    WIN,
+    WindowDataset,
+    compute_stats,
+    load_index,
+    make_splits,
+    split_runs,
+)
 from .model import SpeedHeadingTCN
-
 from .paths import METRIC_DIR, MODEL_DIR
 
 
@@ -65,6 +74,71 @@ def run_epoch(model, loader, device, y_std, opt=None, sched=None):
     if abs_err is None:
         abs_err = np.zeros(3)
     return tot / max(n, 1), abs_err / max(n, 1)
+
+
+@dataclass
+class FitConfig:
+    """Everything that defines a training run.
+
+    Exists so cross-validation trains *identically* to the canonical path -- a
+    duplicated loop would let the two drift, and then the CV estimate would not
+    be an estimate of the shipped model.
+    """
+
+    epochs: int = 40
+    batch_size: int = 256
+    lr: float = 3e-3
+    weight_decay: float = 1e-4
+    width: int = 48
+    device: str = "auto"
+
+
+def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
+        on_epoch=None) -> dict:
+    """Train one model. Returns {model, stats, best_val, history}.
+
+    `on_epoch(entry)` is called after every epoch with that epoch's history
+    record, so callers can log however they like without this function knowing
+    anything about files.
+    """
+    stats = compute_stats(ds_tr)
+    device = pick_device(cfg.device)
+    model = SpeedHeadingTCN(n_channels, width=cfg.width,
+                            n_out=len(stats["y_mean"])).to(device)
+    model.set_stats(stats)
+
+    y_std = torch.tensor(stats["y_std"], dtype=torch.float32, device=device)
+    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,
+                       num_workers=0, drop_last=True)
+    dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False,
+                       num_workers=0)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                            weight_decay=cfg.weight_decay)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=cfg.lr, total_steps=cfg.epochs * max(len(dl_tr), 1),
+        pct_start=0.25)
+
+    best, best_state, history = float("inf"), None, []
+    for ep in range(1, cfg.epochs + 1):
+        t0 = time.time()
+        tr_loss, _ = run_epoch(model, dl_tr, device, y_std, opt, sched)
+        va_loss, va_mae = run_epoch(model, dl_va, device, y_std)
+        history.append({"epoch": ep, "train_loss": tr_loss, "val_loss": va_loss,
+                        "val_mae": va_mae.tolist(),
+                        "lr": opt.param_groups[0]["lr"],
+                        "secs": round(time.time() - t0, 1)})
+        if va_loss < best:
+            best = va_loss
+            best_state = {k: v.detach().clone() for k, v in
+                          model.state_dict().items()}
+        if on_epoch is not None:
+            on_epoch(history[-1])
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return {"model": model, "stats": stats, "best_val": best,
+            "history": history, "device": device}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         print("empty window set")
         return 1
 
-    stats = compute_stats(ds_tr)
+    stats = compute_stats(ds_tr)   # same computation fit() performs internally
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     METRIC_DIR.mkdir(parents=True, exist_ok=True)
     (MODEL_DIR / f"stats{tag}.json").write_text(json.dumps(
@@ -140,62 +214,50 @@ def main(argv: list[str] | None = None) -> int:
     print("targets", TARGETS, "\n  mean", np.round(stats["y_mean"], 4).tolist(),
           "\n  std ", np.round(stats["y_std"], 4).tolist())
 
-    device = pick_device(args.device)
-    model = SpeedHeadingTCN(len(channels), width=args.width,
-                            n_out=len(stats["y_mean"])).to(device)
-    model.set_stats(stats)
-    print(f"device {device}  params {model.n_params}")
-
-    y_std = torch.tensor(stats["y_std"], dtype=torch.float32, device=device)
-    dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True,
-                       num_workers=0, drop_last=True)
-    dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False,
-                       num_workers=0)
-
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                            weight_decay=args.weight_decay)
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=args.lr, total_steps=args.epochs * max(len(dl_tr), 1),
-        pct_start=0.25)
+    cfg = FitConfig(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+                    weight_decay=args.weight_decay, width=args.width,
+                    device=args.device)
 
     log_path = METRIC_DIR / f"train_log{tag}.csv"
-    with log_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["epoch", "train_loss", "val_loss", "val_speed_mae_ms",
-                    "val_dpsi_mae_rad", "val_dpsi_mae_deg", "lr", "secs"])
+    f = log_path.open("w", newline="")
+    w = csv.writer(f)
+    w.writerow(["epoch", "train_loss", "val_loss", "val_speed_mae_ms",
+                "val_dpsi_mae_rad", "val_dpsi_mae_deg", "val_dv_mae_ms",
+                "lr", "secs"])
+    state = {"best": float("inf")}
 
-        best = float("inf")
-        for ep in range(1, args.epochs + 1):
-            t0 = time.time()
-            tr_loss, _ = run_epoch(model, dl_tr, device, y_std, opt, sched)
-            va_loss, va_mae = run_epoch(model, dl_va, device, y_std)
-            dt = time.time() - t0
-            lr_now = opt.param_groups[0]["lr"]
-            w.writerow([ep, f"{tr_loss:.6f}", f"{va_loss:.6f}",
-                        f"{va_mae[0]:.4f}", f"{va_mae[1]:.6f}",
-                        f"{np.rad2deg(va_mae[1]):.4f}",
-                        f"{va_mae[2]:.4f}" if len(va_mae) > 2 else "",
-                        f"{lr_now:.2e}", f"{dt:.1f}"])
-            f.flush()
-            flag = ""
-            if va_loss < best:
-                best = va_loss
-                torch.save({"state_dict": model.state_dict(), "stats": stats,
-                            "channels": channels, "win": args.win,
-                            "out_win": args.out_win,
-                            "channel_indices": (None if chan_idx is None
-                                                else chan_idx.tolist()),
-                            "rotate_aug": args.rotate_aug,
-                            "width": args.width, "epoch": ep},
-                           MODEL_DIR / f"tcn_best{tag}.pt")
-                flag = " *"
-            print(f"ep {ep:3d}/{args.epochs}  train {tr_loss:.4f}  val {va_loss:.4f}"
-                  f"  speed MAE {va_mae[0]:.3f} m/s"
-                  f"  dpsi MAE {np.rad2deg(va_mae[1]):.3f} deg"
-                  f"  dv MAE {va_mae[2]:.3f} m/s  ({dt:.0f}s){flag}",
-                  flush=True)
+    def on_epoch(e):
+        ep, va_mae = e["epoch"], e["val_mae"]
+        w.writerow([ep, f"{e['train_loss']:.6f}", f"{e['val_loss']:.6f}",
+                    f"{va_mae[0]:.4f}", f"{va_mae[1]:.6f}",
+                    f"{np.rad2deg(va_mae[1]):.4f}",
+                    f"{va_mae[2]:.4f}" if len(va_mae) > 2 else "",
+                    f"{e['lr']:.2e}", f"{e['secs']:.1f}"])
+        f.flush()
+        flag = ""
+        if e["val_loss"] < state["best"]:
+            state["best"] = e["val_loss"]
+            flag = " *"
+        print(f"ep {ep:3d}/{args.epochs}  train {e['train_loss']:.4f}  "
+              f"val {e['val_loss']:.4f}"
+              f"  speed MAE {va_mae[0]:.3f} m/s"
+              f"  dpsi MAE {np.rad2deg(va_mae[1]):.3f} deg"
+              f"  dv MAE {va_mae[2]:.3f} m/s  ({e['secs']:.0f}s){flag}",
+              flush=True)
 
-    print(f"\nbest val {best:.4f} -> {MODEL_DIR/f'tcn_best{tag}.pt'}")
+    out = fit(ds_tr, ds_va, len(channels), cfg, on_epoch=on_epoch)
+    f.close()
+
+    print(f"device {out['device']}  params {out['model'].n_params}")
+    torch.save({"state_dict": out["model"].state_dict(),
+                "stats": out["stats"], "channels": channels, "win": args.win,
+                "out_win": args.out_win,
+                "channel_indices": None if chan_idx is None else chan_idx.tolist(),
+                "rotate_aug": args.rotate_aug, "width": args.width,
+                "epoch": min(out["history"],
+                             key=lambda h: h["val_loss"])["epoch"]},
+               MODEL_DIR / f"tcn_best{tag}.pt")
+    print(f"\nbest val {out['best_val']:.4f} -> {MODEL_DIR/f'tcn_best{tag}.pt'}")
     return 0
 
 

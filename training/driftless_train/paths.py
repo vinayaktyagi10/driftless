@@ -34,5 +34,6 @@ EVIDENCE_PATH = ARTIFACT_DIR / "ROUND1_EVIDENCE.md"
 
 # Where the other roles' builds expect the exported models. to_tflite.py can copy
 # there; the files themselves are produced by driftless_train.export.
-ANDROID_ASSETS_DIR = REPO_ROOT / "android" / "app" / "src" / "main" / "assets" / "models"
+ANDROID_ASSETS_DIR = (REPO_ROOT / "android" / "app" / "src" / "main"
+                      / "assets" / "models")
 EDGE_MODELS_DIR = REPO_ROOT / "edge-engine" / "models"

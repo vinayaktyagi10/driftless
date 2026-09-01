@@ -10,11 +10,19 @@ would be built on sand.
 import numpy as np
 import pytest
 
-from driftless_train.augment import (GYRO_XYZ_IDX, invariant_channel_indices,
-                                     random_rotation, rotate_batch, rotate_window,
-                                     tilt_rotation)
-from driftless_train.preprocess import (DERIVED_CHANNELS, FEATURE_CHANNELS,
-                                        GYRO_XYZ_COLUMNS)
+from driftless_train.augment import (
+    GYRO_XYZ_IDX,
+    invariant_channel_indices,
+    random_rotation,
+    rotate_batch,
+    rotate_window,
+    tilt_rotation,
+)
+from driftless_train.preprocess import (
+    DERIVED_CHANNELS,
+    FEATURE_CHANNELS,
+    GYRO_XYZ_COLUMNS,
+)
 
 
 def test_rotations_are_proper():
@@ -70,9 +78,9 @@ def test_derived_channels_are_invariant_on_real_data():
     derived channels through the actual preprocessing, and they must come back
     identical -- because the gravity filter is linear and commutes with R.
     """
+    from driftless_train.paths import RAW_DIR
     from driftless_train.preprocess import _add_imu_features
     from driftless_train.schema import load_raw_csv
-    from driftless_train.paths import RAW_DIR
 
     csvs = sorted(RAW_DIR.glob("S-S1.csv")) or sorted(RAW_DIR.glob("S-*.csv"))
     if not csvs:

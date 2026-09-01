@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,9 +30,8 @@ import torch
 
 from .dataset import DT, PROC_DIR, load_index, make_splits, split_runs
 from .model import SpeedHeadingTCN
-from .preprocess import FEATURE_CHANNELS
-
 from .paths import METRIC_DIR, MODEL_DIR, PLOT_DIR
+from .preprocess import FEATURE_CHANNELS
 
 BLACKOUT_S = (10.0, 30.0, 60.0, 120.0)
 
@@ -365,11 +365,13 @@ def plot_blackout_curve(rows: list[dict], out: Path) -> None:
                     ("model_abs", "#999999")):
         med = [np.median([r[f"{name}_err_m"] for r in rows if r["duration_s"] == d])
                for d in dur]
-        p90 = [np.percentile([r[f"{name}_err_m"] for r in rows if r["duration_s"] == d], 90)
+        p90 = [np.percentile([r[f"{name}_err_m"] for r in rows
+                              if r["duration_s"] == d], 90)
                for d in dur]
         axes[0].plot(dur, med, "o-", color=c, label=f"{name} (median)")
         axes[0].fill_between(dur, med, p90, color=c, alpha=0.15)
-        dmed = [np.median([r[f"{name}_drift_pct"] for r in rows if r["duration_s"] == d])
+        dmed = [np.median([r[f"{name}_drift_pct"] for r in rows
+                           if r["duration_s"] == d])
                 for d in dur]
         axes[1].plot(dur, dmed, "o-", color=c, label=f"{name} (median)")
 
@@ -588,7 +590,8 @@ def main(argv: list[str] | None = None) -> int:
         row = {
             "duration_s": T, "n": len(sub),
             "model_err_med_m": round(g("model_err_m"), 2),
-            "model_err_p90_m": round(g("model_err_m", lambda a: np.percentile(a, 90)), 2),
+            "model_err_p90_m": round(
+                g("model_err_m", lambda a: np.percentile(a, 90)), 2),
             "model_drift_med_pct": round(g("model_drift_pct"), 3),
             "model_abs_err_med_m": round(g("model_abs_err_m"), 2),
             "baseline_err_med_m": round(g("baseline_err_m"), 2),
@@ -609,9 +612,12 @@ def main(argv: list[str] | None = None) -> int:
          "alpha_max": args.alpha_max, "tau_s": args.tau,
          "n_runs": len(per_run),
          "blackout_summary": summary,
-         "speed_mae_ms_mean": round(float(np.mean([r["speed_mae_ms"] for r in per_run])), 4),
-         "dpsi_mae_deg_mean": round(float(np.mean([r["dpsi_mae_deg"] for r in per_run])), 4),
-         "gyro_dpsi_mae_deg_mean": round(float(np.mean([r["gyro_dpsi_mae_deg"] for r in per_run])), 4),
+         "speed_mae_ms_mean": round(
+             float(np.mean([r["speed_mae_ms"] for r in per_run])), 4),
+         "dpsi_mae_deg_mean": round(
+             float(np.mean([r["dpsi_mae_deg"] for r in per_run])), 4),
+         "gyro_dpsi_mae_deg_mean": round(
+             float(np.mean([r["gyro_dpsi_mae_deg"] for r in per_run])), 4),
          }, indent=2))
     print(f"\n-> {METRIC_DIR}/eval_*.csv, {PLOT_DIR}/*.png")
     return 0

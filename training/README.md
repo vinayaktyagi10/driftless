@@ -26,6 +26,9 @@ python -m driftless_train.train --epochs 40
 python -m driftless_train.evaluate --split val --sweep-alpha   # tune the blend
 python -m driftless_train.evaluate --split test                # report numbers
 python -m driftless_train.export      # ONNX + TFLite, with parity checks
+python -m driftless_train.crossval --k 5   # route-wise CV: the honest headline
+python -m driftless_train.noise_params     # measurement noise for role 02's UKF
+python -m driftless_train.allan            # IMU noise characterisation
 python -m driftless_train.report      # assemble ROUND1_EVIDENCE.md
 pytest tests/ -q                      # pins every dataset trap below
 ```
@@ -288,8 +291,36 @@ Three further properties it is built to have:
 
 ## Results
 
-Held-out route, median position error after a GNSS blackout, aggregated over
-489–508 blackout start points per duration:
+Median position error after a GNSS blackout. **These are the cross-validated
+numbers** — 5 folds over all 12 trusted routes,
+each route held out in turn, 4659 blackout start points at 30 s:
+
+| Blackout | Driftless | p90 | Drift | Baseline (no ML) | Oracle floor |
+|---|---|---|---|---|---|
+| **10 s** | **11.18 m** | 29.3 m | 13.2 % | 28.66 m | 1.5 m |
+| **30 s** | **42.09 m** | 118.41 m | 18.3 % | 163.46 m | 6.21 m |
+| **60 s** | **88.17 m** | 256.01 m | 18.9 % | 365.7 m | 17.85 m |
+| **120 s** | **191.74 m** | 559.22 m | 19.7 % | 727.02 m | 50.45 m |
+
+Per-window across folds: speed MAE **2.242
+± 0.349 m/s**, heading MAE
+**1.624 ±
+0.71°**.
+
+At 30 s the model is **3.9×**
+better than dead reckoning without ML, and at 120 s
+**3.8×**. The oracle row is
+the floor: what perfect speed and heading would still cost, given that position
+comes from integration.
+
+Regenerate with `python -m driftless_train.crossval --k 5` (or
+`--rebuild-docs` to re-aggregate saved samples); numbers come from
+`artifacts/metrics/crossval.json`.
+
+### On the single held-out split
+
+The shipped checkpoint is trained on the frozen 70/15/15 split and evaluated on
+its one test route, which is what `evaluate.py` reports:
 
 | Blackout | Driftless | p90 | Drift | Baseline (no ML) | Oracle floor |
 |---|---|---|---|---|---|
@@ -301,8 +332,56 @@ Held-out route, median position error after a GNSS blackout, aggregated over
 Per-window: speed MAE **1.544 m/s**, heading MAE **1.07°** — against **15.71°**
 for raw gyro integration, i.e. **14.7× better**.
 
-Regenerate with `python -m driftless_train.evaluate --split test`; the numbers
-above come from `artifacts/metrics/eval_summary.json`.
+These are the numbers for the artefact that actually ships, so they are kept
+here — but that route turns out to be the easiest of the eleven, so they are not
+the ones to quote. Regenerate with
+`python -m driftless_train.evaluate --split test`; source
+`artifacts/metrics/eval_summary.json`.
+
+### How the cross-validation was built, and what it changed
+
+The single-split table above holds out one route. To find out whether that road
+was representative, `crossval.py` deals the trusted routes into
+duration-balanced folds and trains one model per fold through the *same*
+`train.fit` the shipped model uses, so the estimate is of this model rather than
+a lookalike. 11 of 12 routes yield blackout samples; the twelfth is shorter than
+the shortest blackout and contributes training data only.
+
+Fold-to-fold spread at 30 s: **42.244 ± 5.243 m** (range 35.7–49.25 m). Speed
+MAE **2.242 ± 0.349 m/s**, Δψ MAE **1.624 ± 0.71°**.
+
+**The honest headline is the cross-validated one.** Pooled 30 s error is
+**42.09 m** against **31.39 m** on the single test route — **1.34× worse**.
+Cross-validated on its own, **S/S1** is the easiest of the 11 evaluated routes
+at 30 s (32.45 m, against a per-route median of 43.94 m), so the single-split
+number is the optimistic end of this model's range rather than its centre. Two
+effects are mixed in and 12 routes cannot fully separate them: each fold model
+trains on ~3/5 of the trusted pool, which pushes its error *up*, while the test
+route is genuinely easier, which pushes the single-split figure *down*. Both
+numbers are quoted everywhere; the cross-validated one leads.
+
+Per route, each tested out-of-sample by the one fold that held it out:
+
+| route | h | 10 s | 30 s | 60 s | 120 s | n at 30 s |
+|---|---|---|---|---|---|---|
+| S/S1 | 1.437 | 8.75 m | **32.45 m** | 61.18 m | 113.47 m | 507 |
+| S/S3b | 0.189 | 7.88 m | **34.22 m** | 45.77 m | 81.01 m | 55 |
+| S/S4 | 2.527 | 10.0 m | **35.14 m** | 68.98 m | 139.92 m | 870 |
+| Vw/Vw05 ⚠ | 0.028 | 12.14 m | **40.89 m** | 140.66 m | — | 4 |
+| S/S3a | 0.684 | 11.02 m | **41.35 m** | 82.07 m | 173.06 m | 240 |
+| S/S2 | 2.608 | 11.32 m | **43.94 m** | 95.65 m | 232.96 m | 911 |
+| M/M (Driver B) | 2.944 | 10.98 m | **46.78 m** | 106.0 m | 239.75 m | 954 |
+| S/S3c | 1.033 | 13.24 m | **47.66 m** | 95.68 m | 248.12 m | 365 |
+| Y/Y1 | 1.859 | 13.78 m | **51.52 m** | 106.05 m | 211.23 m | 644 |
+| Vta/Vta24 ⚠ | 0.033 | 18.29 m | **58.41 m** | 97.15 m | — | 5 |
+| Vta/Vta02 | 0.305 | 17.38 m | **59.72 m** | 152.68 m | 420.69 m | 104 |
+
+Sorted easiest first. `—` means the route is shorter than the blackout. **⚠
+marks fewer than 30 samples at 30 s** — indicative only. Across the 9 routes
+with enough samples the 30 s median spans **32.45 m (S/S1) to 59.72 m
+(Vta/Vta02)**, a factor of 1.8 — precisely why one held-out road is not enough.
+Rebuild the tables from saved samples with `python -m driftless_train.crossval
+--rebuild-docs`; full detail in `artifacts/metrics/crossval.md`.
 
 ## Evaluation: the question a judge will ask
 

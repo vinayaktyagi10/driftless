@@ -21,7 +21,6 @@ import numpy as np
 import torch
 
 from .evaluate import load_model
-
 from .paths import MODEL_DIR
 
 # Parity tolerance is expressed as a fraction of each output's own standard

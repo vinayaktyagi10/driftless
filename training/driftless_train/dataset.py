@@ -214,7 +214,8 @@ class WindowDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
-    def window_targets(self, a: dict[str, np.ndarray], end: int) -> tuple[float, float, float]:
+    def window_targets(self, a: dict[str, np.ndarray],
+                       end: int) -> tuple[float, float, float]:
         """Mean speed and heading change over the OUTPUT interval.
 
         Heading change is the integral of the vehicle's yaw rate, NOT the

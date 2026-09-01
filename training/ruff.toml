@@ -1,0 +1,21 @@
+# Pinned so "lint clean" is a reproducible claim.
+#
+# Without this file ruff applies whatever its installed version defaults to, and
+# those defaults move: ruff 0.16 flagged 102 findings across this package that
+# an earlier version did not, none of them a defect. An explicit select list
+# means a lint pass means the same thing on every machine and in CI.
+line-length = 88
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+# Deliberately NOT selected, with reasons:
+#   ISC  - the markdown builders wrap long sentences as adjacent string literals
+#          inside list literals on purpose; ISC004 cannot tell that from a
+#          missing comma. The generated .md files are checked by tests instead.
+#   RUF  - opinionated and unstable across releases, which is the drift this
+#          file exists to stop.
+#   BLE  - the three blind excepts are best-effort/optional-dependency paths
+#          (torch-free import, optional TF, absent artefact) and are intended.
+#   DTZ  - report headers stamp a local date; timezone-aware is not wanted.

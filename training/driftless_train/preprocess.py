@@ -302,6 +302,7 @@ def preprocess_report(df: pd.DataFrame) -> dict:
         "speed_ms_mean_moving": float(np.nanmean(v_doppler)) if v_doppler.size else 0.0,
         "speed_ms_max": float(np.nanmax(df["gt_speed_ms"])),
         "speed_resid_mae_ms": float(np.abs(resid).mean()) if resid.size else np.nan,
-        "speed_resid_p95_ms": float(np.percentile(np.abs(resid), 95)) if resid.size else np.nan,
+        "speed_resid_p95_ms": (float(np.percentile(np.abs(resid), 95))
+                               if resid.size else np.nan),
         "gap_count": int(df["gap"].sum()),
     }

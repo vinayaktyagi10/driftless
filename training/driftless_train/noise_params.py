@@ -249,7 +249,8 @@ def write_markdown(res: dict, path) -> None:
         "    return z;",
         "};",
         "Eigen::MatrixXd sqrt_R(1, 1);",
-        f"sqrt_R(0, 0) = {sp['sigma_mps']} * {infl};   // sigma x correlation inflation",
+        f"sqrt_R(0, 0) = {sp['sigma_mps']} * {infl};"
+        "   // sigma x correlation inflation",
         "engine.updateUnscented(h, z_from_model, sqrt_R, 0.99);",
         "```",
         "",

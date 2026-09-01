@@ -16,7 +16,9 @@ import json
 from datetime import date
 from pathlib import Path
 
-from .paths import ARTIFACT_DIR as ART, CONFIG_DIR, PROC_DIR
+from .paths import ARTIFACT_DIR as ART
+from .paths import CONFIG_DIR, PROC_DIR
+
 METRIC_DIR = ART / "metrics"
 PLOT_DIR = ART / "plots"
 MODEL_DIR = ART / "models"
@@ -28,6 +30,12 @@ def _load(path: Path):
     if path.suffix == ".json":
         return json.loads(path.read_text())
     return path.read_text()
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
 
 
 def _table(rows: list[dict], cols: list[tuple[str, str]]) -> str:
@@ -47,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     ev = _load(METRIC_DIR / "eval_summary.json")
     noise = _load(METRIC_DIR / "measurement_noise.json")
     allan = _load(METRIC_DIR / "allan_imu_noise.json")
+    cv = _load(METRIC_DIR / "crossval.json")
     ckpt_meta = {}
     ck_path = MODEL_DIR / "tcn_best.pt"
     if ck_path.exists():
@@ -152,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
             "- **abs-only** — the absolute speed head alone, no propagation",
             "- **baseline** — no ML: hold the last known speed, integrate the "
             "phone gyro for heading",
-            "- **oracle** — integrate the *true* speed and yaw: the dead-reckoning floor",
+            "- **oracle** — integrate the *true* speed and yaw: "
+            "the dead-reckoning floor",
             "",
             _table(
                 [{"d": f"{r['duration_s']:.0f} s",
@@ -177,11 +187,91 @@ def main(argv: list[str] | None = None) -> int:
             f"{ev['out_win']*0.1:.1f} s window",
             f"- Same heading by raw gyro integration alone: "
             f"**{ev['gyro_dpsi_mae_deg_mean']:.3f}°** — the learned head is "
-            f"{ev['gyro_dpsi_mae_deg_mean']/max(ev['dpsi_mae_deg_mean'],1e-9):.1f}× better",
+            f"{ev['gyro_dpsi_mae_deg_mean']/max(ev['dpsi_mae_deg_mean'], 1e-9):.1f}"
+            "× better",
             "",
             "Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.",
             "",
         ]
+
+    # The single-split table above is one held-out road. Cross-validation is what
+    # says whether that road was representative, so it goes immediately after --
+    # a reader must not be able to take the headline without the spread.
+    if cv and cv.get("pooled"):
+        p30 = next((r for r in cv["pooled"] if int(r["duration_s"]) == 30), None)
+        af = cv["across_folds"]
+        single30 = next((r for r in ev["blackout_summary"]
+                         if int(r["duration_s"]) == 30), None) if ev else None
+        L += [
+            "### Cross-validated — how representative was that one road?",
+            "",
+            f"The table above holds out **one route**. To find out whether it "
+            f"was a lucky one, `crossval.py` runs **{cv['k']}-fold route-wise "
+            f"cross-validation** over the "
+            f"**{cv['n_trusted_routes']} trusted routes** "
+            f"({cv['trusted_hours']} h): each is held out in turn by a model "
+            f"trained through the same `train.fit`, and the errors are pooled. "
+            f"{len(cv.get('per_route', []))} of {cv['n_trusted_routes']} yield "
+            f"blackout samples"
+            + (f" ({', '.join(cv['unevaluated_routes'])} is shorter than the "
+               f"shortest blackout, so it contributes training data only)."
+               if cv.get("unevaluated_routes") else "."),
+            "",
+            "| Blackout | n | CV median | CV p90 | drift | baseline | oracle |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for r in cv["pooled"]:
+            L.append(f"| {int(r['duration_s'])} s | {r['n']} | "
+                     f"**{r['model_med_m']} m** | {r['model_p90_m']} m | "
+                     f"{r['model_drift_med_pct']:.1f} % | "
+                     f"{r['baseline_med_m']} m | {r['oracle_med_m']} m |")
+        L += [
+            "",
+            f"Fold-to-fold spread at 30 s: **{af['med_30s']['mean']} ± "
+            f"{af['med_30s']['std']} m** (range {af['med_30s']['min']}–"
+            f"{af['med_30s']['max']} m). Speed MAE "
+            f"**{af['speed_mae_ms']['mean']} ± {af['speed_mae_ms']['std']} m/s**.",
+            "",
+        ]
+        if p30 and single30:
+            ratio = p30["model_med_m"] / max(single30["model_err_med_m"], 1e-9)
+            # Where the shipped test route actually ranks, computed rather than
+            # asserted: a hand-written "it was an easy road" would go stale the
+            # first time the split or the fold deal changes.
+            test_routes = (splits or {}).get("splits", {}).get("test", [])
+            ranked = sorted((r for r in cv.get("per_route", [])
+                             if r.get("med_30s") is not None),
+                            key=lambda r: r["med_30s"])
+            rank_txt = ""
+            for i, r in enumerate(ranked):
+                if r["route"] not in test_routes:
+                    continue
+                where = ("the easiest" if i == 0 else
+                         f"the {_ordinal(i + 1)} easiest")
+                rank_txt = (
+                    f" Cross-validated on its own, the shipped test route "
+                    f"**{r['route']}** is {where} of the {len(ranked)} "
+                    f"evaluated routes at 30 s ({r['med_30s']} m, against a "
+                    f"per-route median of "
+                    f"{ranked[len(ranked) // 2]['med_30s']} m), so the "
+                    f"single-split figure is the optimistic end of this "
+                    f"model's range rather than its centre.")
+                break
+            L += [
+                f"**Read this before quoting the headline.** The pooled 30 s "
+                f"median is **{p30['model_med_m']} m** against "
+                f"**{single30['model_err_med_m']} m** on the single test route — "
+                f"{ratio:.2f}× worse.{rank_txt} Two effects are mixed in and "
+                f"{cv['n_trusted_routes']} routes cannot fully separate them: "
+                f"fold models train on ~3/5 of the trusted pool, which pushes "
+                f"their error up, and the test route is genuinely easier, which "
+                f"pushes the single-split figure down. We quote both numbers "
+                f"everywhere and lead with the cross-validated one.",
+                "",
+                "Per-route figures are in `artifacts/metrics/crossval.md`; the "
+                "raw samples are in `crossval_samples.csv`.",
+                "",
+            ]
 
     if ckpt_meta:
         L += [

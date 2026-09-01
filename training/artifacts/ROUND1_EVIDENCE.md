@@ -56,6 +56,23 @@ Held-out **test** split, 1 run(s). Context 8.0 s, output interval 2.0 s. Blackou
 
 Raw per-blackout records: `artifacts/metrics/eval_blackouts.csv`.
 
+### Cross-validated — how representative was that one road?
+
+The table above holds out **one route**. To find out whether it was a lucky one, `crossval.py` runs **5-fold route-wise cross-validation** over the **12 trusted routes** (13.664 h): each is held out in turn by a model trained through the same `train.fit`, and the errors are pooled. 11 of 12 yield blackout samples (Vta/Vta25 is shorter than the shortest blackout, so it contributes training data only).
+
+| Blackout | n | CV median | CV p90 | drift | baseline | oracle |
+|---|---|---|---|---|---|---|
+| 10 s | 4471 | **11.18 m** | 29.3 m | 13.2 % | 28.66 m | 1.5 m |
+| 30 s | 4659 | **42.09 m** | 118.41 m | 18.3 % | 163.46 m | 6.21 m |
+| 60 s | 4665 | **88.17 m** | 256.01 m | 18.9 % | 365.7 m | 17.85 m |
+| 120 s | 4587 | **191.74 m** | 559.22 m | 19.7 % | 727.02 m | 50.45 m |
+
+Fold-to-fold spread at 30 s: **42.244 ± 5.243 m** (range 35.7–49.25 m). Speed MAE **2.242 ± 0.349 m/s**.
+
+**Read this before quoting the headline.** The pooled 30 s median is **42.09 m** against **31.39 m** on the single test route — 1.34× worse. Cross-validated on its own, the shipped test route **S/S1** is the easiest of the 11 evaluated routes at 30 s (32.45 m, against a per-route median of 43.94 m), so the single-split figure is the optimistic end of this model's range rather than its centre. Two effects are mixed in and 12 routes cannot fully separate them: fold models train on ~3/5 of the trusted pool, which pushes their error up, and the test route is genuinely easier, which pushes the single-split figure down. We quote both numbers everywhere and lead with the cross-validated one.
+
+Per-route figures are in `artifacts/metrics/crossval.md`; the raw samples are in `crossval_samples.csv`.
+
 ## 5. Robustness: the phone is not lying flat in a car
 
 Every phone in IO-VNBD lay flat (mean accelerometer direction ≈ (0, 0, 1) in all runs), but the product puts one in a dashboard mount at an arbitrary angle. Nine of the fourteen input channels are raw body axes and leave the training distribution as soon as the phone is tilted. Measured under a simulated mount rotation (random azimuth, tilt up to 60°) on the held-out route:

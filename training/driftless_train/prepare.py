@@ -18,9 +18,8 @@ import numpy as np
 import pandas as pd
 
 from .pair import pair_route
-from .preprocess import FEATURE_CHANNELS
-
 from .paths import PROC_DIR, RAW_DIR
+from .preprocess import FEATURE_CHANNELS
 
 TARGET_KEYS = ("speed_ms", "yaw_rate_rads", "heading_rad", "east_m", "north_m")
 
@@ -70,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         want = set(args.routes)
         routes = [r for r in routes if r[0] in want or r[0].split("/")[-1] in want]
     if not routes:
-        print("no complete S+V pairs on disk yet; run `python -m driftless_train.download`")
+        print("no complete S+V pairs on disk yet; "
+              "run `python -m driftless_train.download`")
         return 1
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +122,8 @@ def main(argv: list[str] | None = None) -> int:
 
     tot_h = sum(r["duration_s"] for r in index) / 3600
     tot_km = sum(r["path_len_m"] for r in index) / 1000
-    print(f"\n{len(index)} runs  |  {tot_h:.2f} h  |  {tot_km:.1f} km  -> {args.out_dir}")
+    print(f"\n{len(index)} runs  |  {tot_h:.2f} h  |  {tot_km:.1f} km  "
+          f"-> {args.out_dir}")
     return 0
 
 

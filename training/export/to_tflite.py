@@ -35,8 +35,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from driftless_train.export import main as export_main  # noqa: E402
-from driftless_train.paths import (ANDROID_ASSETS_DIR, EDGE_MODELS_DIR,  # noqa: E402
-                                   MODEL_DIR)
+from driftless_train.paths import (  # noqa: E402
+    ANDROID_ASSETS_DIR,
+    EDGE_MODELS_DIR,
+    MODEL_DIR,
+)
 
 
 def copy_to_consumers() -> None:
