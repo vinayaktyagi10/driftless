@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     allan = _load(METRIC_DIR / "allan_imu_noise.json")
     cv = _load(METRIC_DIR / "crossval.json")
     tier = _load(METRIC_DIR / "sensor_tier.json")
+    tier_lp = _load(METRIC_DIR / "sensor_tier_lpaug.json")
     ckpt_meta = {}
     ck_path = MODEL_DIR / "tcn_best.pt"
     if ck_path.exists():
@@ -429,8 +430,23 @@ def main(argv: list[str] | None = None) -> int:
         + "across held-out runs. Road, tyre and engine vibration grows with "
         "speed, and the model uses it. That cue is specific to this sensor, "
         "mount, vehicle and road surface, and the cross-validation held all four "
-        "fixed — so it cannot see this dependence. See "
-        "`artifacts/metrics/sensor_tier.md`.",
+        "fixed — so it cannot see this dependence. Training on low-passed "
+        "copies of each run removes the dependence — the same 2 Hz shift then "
+        "costs "
+        + (f"{_tier_ratio(tier_lp, 2.0):.2f}× " if _tier_ratio(tier_lp, 2.0)
+           else "")
+        + "instead, and 0.5 Hz holds at "
+        + (f"{_tier_ratio(tier_lp, 0.5):.2f}× " if _tier_ratio(tier_lp, 0.5)
+           else "")
+        + "despite never being trained on — at the cost of "
+        + (f"{tier_lp['native_med_30s_m'] / tier['native_med_30s_m'] - 1:.0%} "
+           if tier_lp and tier and tier.get("native_med_30s_m") else "")
+        + "on the native phone tier. That cost is the size of the vibration "
+        "shortcut. The shipped checkpoint keeps the accuracy; for a "
+        "different vehicle, handset or a cleaner IMU, retrain with "
+        "`--lowpass-aug 4 2 1` and fine-tune from that instead (checkpoints "
+        "are not in the repo — `*.pt` is gitignored). See "
+        "`artifacts/metrics/sensor_tier.md` and `sensor_tier_lpaug.md`.",
         "- Trained on IO-VNBD: UK/France/Nigeria, one phone, one vehicle. Indian "
         "roads and other handsets are the fine-tuning step the roadmap already "
         "sequences (pre-train public → fine-tune own captures).",

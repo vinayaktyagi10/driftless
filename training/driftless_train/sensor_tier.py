@@ -175,6 +175,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cutoffs", type=float, nargs="+", default=list(CUTOFFS_HZ))
     ap.add_argument("--device", default="auto")
     ap.add_argument("--ckpt", type=Path, default=MODEL_DIR / "tcn_best.pt")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the report filenames, so measuring a "
+                         "candidate checkpoint cannot overwrite the shipped "
+                         "model's report")
     args = ap.parse_args(argv)
 
     import torch
@@ -284,13 +288,15 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     res = {"splits": args.splits, "n_runs": len(native), "mechanism": mech,
+           "ckpt": args.ckpt.name,
            "routes": sorted({r["route"] for r in rows}),
            "context_s": round(win * DT, 2), "rows": rows, "summary": summary,
            "native_med_30s_m": round(float(np.mean(
                [r["med_30s"] for r in native.values() if r["med_30s"]])), 2)}
     METRIC_DIR.mkdir(parents=True, exist_ok=True)
-    (METRIC_DIR / "sensor_tier.json").write_text(json.dumps(res, indent=2))
-    write_markdown(res)
+    tag = f"_{args.tag}" if args.tag else ""
+    (METRIC_DIR / f"sensor_tier{tag}.json").write_text(json.dumps(res, indent=2))
+    write_markdown(res, tag)
 
     print(f"{'cutoff':>8}{'HF gone (a/g)':>18}{'speed MAE':>11}"
           f"{'dpsi':>9}{'30 s':>9}{'60 s':>9}")
@@ -313,16 +319,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {b['lo_ms']:2d}-{b['hi_ms']:2d} m/s  n={b['n']:5d}  "
                   f"HF acc {b['hf_acc_rms']:.4f} m/s^2  "
                   f"HF gyro {b['hf_gyro_rms']:.5f} rad/s")
-    print(f"\n-> {METRIC_DIR / 'sensor_tier.md'}")
+    print(f"\n-> {METRIC_DIR / ('sensor_tier' + tag + '.md')}")
     return 0
 
 
-def write_markdown(res: dict) -> None:
+def write_markdown(res: dict, tag: str = "") -> None:
     L = [
         "# Sensor-tier transfer: can the phone model serve a cleaner IMU?",
         "",
         f"Measured on {res['n_runs']} trusted held-out run(s) "
-        f"({', '.join(res['routes'])}) with the shipped checkpoint, unmodified. "
+        f"({', '.join(res['routes'])}) with `{res.get('ckpt', 'tcn_best.pt')}`, "
+        f"unmodified. "
         f"A cleaner sensor is simulated by low-passing the raw accelerometer and "
         f"gyroscope axes and re-deriving the attitude-invariant channels — which "
         f"also simulates the anti-alias filtering that decimating a 200 Hz FOG "
@@ -402,7 +409,7 @@ def write_markdown(res: dict) -> None:
         "shift instead of the noise change under test. It is an offline test "
         "input generator, not an online filter.",
     ]
-    (METRIC_DIR / "sensor_tier.md").write_text("\n".join(L))
+    (METRIC_DIR / f"sensor_tier{tag}.md").write_text("\n".join(L))
 
 
 if __name__ == "__main__":

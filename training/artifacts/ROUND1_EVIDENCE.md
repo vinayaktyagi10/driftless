@@ -135,7 +135,7 @@ The measurement is the longitudinal body-velocity component — the one axis the
 ## 9. Deployment artefacts
 
 - **38,499 parameters**, input `[1, 14, 80]`, outputs `speed_ms, dpsi_rad, dv_ms` in SI units.
-- **ONNX** (C++ edge engine, roles 04–05): 123.4 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1206 ms/window** on CPU.
+- **ONNX** (C++ edge engine, roles 04–05): 270.1 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.132 ms/window** on CPU.
 - **TFLite** (Android app, role 01): 182.3 KB, matches PyTorch to **1.51e-06** relative.
 
 Normalisation is baked into both graphs, so the phone and the C++ engine cannot disagree with training about scaling.
@@ -143,7 +143,7 @@ Normalisation is baked into both graphs, so the phone and the C++ engine cannot 
 ## 10. Honest limitations
 
 - **The regressor alone does not reach the <10 m at 30 s target.** It reaches roughly that at a 10 s blackout; at 30 s the residual is dominated by absolute-speed error, which is the fundamentally hard part of inertial-only odometry. Closing the rest is what the road-network constraint (map matching) and the EKF in role 02 are for — a vehicle on a known road cannot be anywhere the map does not allow.
-- **The speed head partly reads vibration, so a different vehicle or handset is an untested shift.** Low-passing the held-out input at 2 Hz costs 2.1× at a 30 s blackout while heading-change error is unchanged, and high-frequency energy correlates with true speed at +0.64 across held-out runs. Road, tyre and engine vibration grows with speed, and the model uses it. That cue is specific to this sensor, mount, vehicle and road surface, and the cross-validation held all four fixed — so it cannot see this dependence. See `artifacts/metrics/sensor_tier.md`.
+- **The speed head partly reads vibration, so a different vehicle or handset is an untested shift.** Low-passing the held-out input at 2 Hz costs 2.1× at a 30 s blackout while heading-change error is unchanged, and high-frequency energy correlates with true speed at +0.64 across held-out runs. Road, tyre and engine vibration grows with speed, and the model uses it. That cue is specific to this sensor, mount, vehicle and road surface, and the cross-validation held all four fixed — so it cannot see this dependence. Training on low-passed copies of each run removes the dependence — the same 2 Hz shift then costs 0.99× instead, and 0.5 Hz holds at 1.48× despite never being trained on — at the cost of 8% on the native phone tier. That cost is the size of the vibration shortcut. The shipped checkpoint keeps the accuracy; for a different vehicle, handset or a cleaner IMU, retrain with `--lowpass-aug 4 2 1` and fine-tune from that instead (checkpoints are not in the repo — `*.pt` is gitignored). See `artifacts/metrics/sensor_tier.md` and `sensor_tier_lpaug.md`.
 - Trained on IO-VNBD: UK/France/Nigeria, one phone, one vehicle. Indian roads and other handsets are the fine-tuning step the roadmap already sequences (pre-train public → fine-tune own captures).
 - IO-VNBD phone data is 10 Hz; our own captures target 100 Hz. The window is defined in seconds, so the design carries over — but it needs retraining, not just reuse.
 - Ground truth is the vehicle's own CAN + survey GNSS, so labels inherit its ~0.2 % self-consistency floor.
