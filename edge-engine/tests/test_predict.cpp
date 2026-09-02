@@ -207,6 +207,65 @@ TEST(Predict, AccelBiasIntegratesIntoPositionQuadratically) {
     EXPECT_NEAR(engine.state().position.x(), expected, 1e-3 * expected);
 }
 
+// --- Seeding a learned bias prior at initialization -------------------------
+//
+// There is no dedicated API for this: NavState::accel_bias / gyro_bias are
+// exactly what a caller sets before construction. These two tests exist to
+// PIN THAT DOWN rather than to add anything -- the two prior tests just
+// showed an unobserved bias costs bias*T of heading error and 0.5*bias*T^2 of
+// position error with no update to correct either during a blackout; a
+// caller who has even an approximate prior for that bias (e.g. a learned
+// cold-start estimate, per DECISIONS.md) can hand it to the same constructor
+// used everywhere else and cut most of that cost before predict() ever runs.
+
+TEST(Predict, SeedingAnApproximateGyroBiasPriorCutsUnaidedHeadingDrift) {
+    constexpr double kTrueBias = 2e-4;  // rad/s about body-down
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.gyro_bias = Vec3(0.0, 0.0, kTrueBias);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);  // NavState{} defaults to zero bias
+
+    NavState warm_start;
+    warm_start.gyro_bias = Vec3(0.0, 0.0, 0.9 * kTrueBias);  // an imperfect prior
+    const auto warm = runStream(samples, warm_start);
+
+    // True heading is 0 throughout (ConstantTurnTrajectory(0, 0) is straight
+    // and stationary), so the state's own heading IS the error.
+    const double cold_error = std::abs(headingOf(cold.state()));
+    const double warm_error = std::abs(headingOf(warm.state()));
+    std::cout << "[ INFO     ] heading error, cold start vs seeded prior: "
+              << cold_error << " -> " << warm_error << " rad\n";
+    EXPECT_LT(warm_error, 0.2 * cold_error);
+}
+
+TEST(Predict, SeedingAnApproximateAccelBiasPriorCutsUnaidedPositionDrift) {
+    constexpr double kTrueBias = 0.01;  // m/s^2 forward
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.accel_bias = Vec3(kTrueBias, 0.0, 0.0);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);
+
+    NavState warm_start;
+    warm_start.accel_bias = Vec3(0.9 * kTrueBias, 0.0, 0.0);
+    const auto warm = runStream(samples, warm_start);
+
+    // True position is 0 throughout (same stationary trajectory as above), so
+    // the state's own position IS the error.
+    const double cold_error = std::abs(cold.state().position.x());
+    const double warm_error = std::abs(warm.state().position.x());
+    std::cout << "[ INFO     ] position error, cold start vs seeded prior: "
+              << cold_error << " -> " << warm_error << " m\n";
+    EXPECT_LT(warm_error, 0.2 * cold_error);
+}
+
 TEST(Predict, SecondOrderMeanCorrectionScalesWithAttitudeVariance) {
     // With a REALISTIC covariance the propagated mean is deliberately not the
     // integration of the mean. E[R(dtheta) * f] != R * f when attitude is
