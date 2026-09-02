@@ -21,6 +21,10 @@ android {
         }
     }
 
+    buildFeatures {
+        viewBinding = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -37,4 +41,17 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.osmdroid:osmdroid-android:6.1.20")
+
+    // Settings screen. PreferenceFragmentCompat gives the whole screen with
+    // SharedPreferences backing; hand-rolling it would cost a day we don't have.
+    implementation("androidx.preference:preference-ktx:1.2.1")
+
+    // repeatOnLifecycle, so sampler Flows stop collecting when the app is
+    // backgrounded instead of holding the sensors open and draining the battery.
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    testImplementation("junit:junit:4.13.2")
 }
