@@ -7,6 +7,8 @@ import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.WindowManager
 import android.location.LocationManager
 import android.provider.Settings
 import android.util.Log
@@ -20,11 +22,13 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.driftless.R
 import com.driftless.databinding.ActivityMainBinding
 import com.driftless.fusion.GnssFix
+import com.driftless.logging.TrackLogger
 import com.driftless.sensors.GnssSampler
 import com.driftless.sensors.ImuFrame
 import com.driftless.sensors.ImuSampler
 import com.driftless.settings.AppSettings
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -43,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: AppSettings
     private lateinit var imuSampler: ImuSampler
     private lateinit var gnssSampler: GnssSampler
+    private lateinit var logger: TrackLogger
 
     private var samplingJob: Job? = null
 
@@ -55,6 +60,8 @@ class MainActivity : AppCompatActivity() {
     private var latestFrame: ImuFrame? = null
     private var gnssCount = 0L
     private var latestFix: GnssFix? = null
+    private var anchorLogged = false
+    private var lastFixRealtimeNanos = 0L
 
     /**
      * The four states that actually need different UI. Android collapses
@@ -93,9 +100,18 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // Sampling is scoped to repeatOnLifecycle(STARTED), which is correct --
+        // a 500 Hz IMU must not keep running behind a locked screen. The
+        // consequence is that a screen timeout silently ends a road test
+        // partway through, leaving a track that simply stops. A window flag
+        // rather than a wake lock: it needs no permission and cannot outlive
+        // the activity, so there is nothing to leak if the app is killed.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         settings = AppSettings(this)
         imuSampler = ImuSampler(this)
         gnssSampler = GnssSampler(this)
+        logger = TrackLogger(this, lifecycleScope)
 
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -202,19 +218,42 @@ class MainActivity : AppCompatActivity() {
 
         samplingJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch {
-                    imuSampler.frames(settings.sensorDelay).collect { frame ->
-                        imuCount++
-                        latestFrame = frame
+                // Tied to the sampling lifecycle rather than to onCreate, so a
+                // log file always covers exactly the span that produced data.
+                val file = logger.start(settings.sensorDelay, settings.gnssIntervalMillis)
+                Log.i(DIAG_TAG, "logging to ${file?.absolutePath ?: "<unavailable>"}")
+
+                try {
+                    launch {
+                        imuSampler.frames(settings.sensorDelay).collect { frame ->
+                            imuCount++
+                            latestFrame = frame
+                            logger.logImu(frame)
+                        }
                     }
-                }
-                launch {
-                    gnssSampler.fixes(settings.gnssIntervalMillis).collect { fix ->
-                        gnssCount++
-                        latestFix = fix
+                    launch {
+                        gnssSampler.fixes(settings.gnssIntervalMillis).collect { fix ->
+                            gnssCount++
+                            latestFix = fix
+                            lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+
+                            gnssSampler.frame?.let { frame ->
+                                if (!anchorLogged) {
+                                    logger.logAnchor(frame)
+                                    anchorLogged = true
+                                }
+                            }
+                            logger.logFix(fix)
+                        }
                     }
+                    launch { tickDiagnostics() }
+                    awaitCancellation()
+                } finally {
+                    // Reached when the lifecycle drops below STARTED, which is
+                    // also when the samplers are released. Closing here is what
+                    // flushes the tail of the file.
+                    logger.stop()
                 }
-                launch { tickDiagnostics() }
             }
         }
     }
@@ -246,6 +285,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Seconds since the last fix, or -1 before the first one arrives.
+     *
+     * Shown because sigma alone is misleading during exactly the event a road
+     * test exists to find: a receiver that stops reporting keeps its last
+     * sigma_h on screen and goes on looking healthy. Age is the only field here
+     * that moves when GNSS dies.
+     */
+    private fun fixAgeSeconds(): Double =
+        if (lastFixRealtimeNanos == 0L) -1.0
+        else (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9
+
     private fun diagnosticsText(): String = buildString {
         val f = latestFrame
         appendLine("IMU   ${"%.0f".format(Locale.US, measuredHz)} Hz   n=$imuCount")
@@ -262,7 +313,11 @@ class MainActivity : AppCompatActivity() {
         appendLine()
 
         val fix = latestFix
-        appendLine("GNSS  n=$gnssCount   sats=${gnssSampler.satellitesUsed}")
+        appendLine(
+            "GNSS  n=$gnssCount   sats=${gnssSampler.satellitesUsed}   age=%.1fs"
+                .format(Locale.US, fixAgeSeconds())
+        )
+        appendLine("      log dropped=${logger.droppedRecords.get()}")
         if (fix == null) {
             appendLine("      waiting for first fix…")
         } else {
