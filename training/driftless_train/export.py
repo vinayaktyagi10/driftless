@@ -79,11 +79,17 @@ def _parity(y_ref: np.ndarray, y_new: np.ndarray, frac: float) -> dict:
 
 def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
     dummy = torch.zeros(1, n_ch, win, dtype=torch.float32)
+    # external_data=False keeps the weights INSIDE the .onnx. The default split
+    # them into a sidecar .onnx.data whose filename is recorded inside the model,
+    # so the pair could not be renamed independently and a consumer that copied
+    # only the .onnx got a cryptic load failure at runtime. This model is ~150 KB
+    # of weights; there is nothing to gain from external data and a whole class
+    # of deployment bug to lose.
     torch.onnx.export(
         model, (dummy,), str(out),
         input_names=["imu_window"], output_names=["speed_dpsi"],
         dynamic_axes={"imu_window": {0: "batch"}, "speed_dpsi": {0: "batch"}},
-        opset_version=18, do_constant_folding=True,
+        opset_version=18, do_constant_folding=True, external_data=False,
     )
 
     import onnxruntime as ort

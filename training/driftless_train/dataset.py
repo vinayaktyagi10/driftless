@@ -181,7 +181,8 @@ class WindowDataset(Dataset):
     def __init__(self, runs: list[Run], win: int = WIN, stride: int = STRIDE_TRAIN,
                  out_win: int = OUT_WIN, moving_only: bool = False,
                  rotate_aug: bool = False, max_tilt_deg: float = 60.0,
-                 channels: np.ndarray | None = None, seed: int = 0):
+                 channels: np.ndarray | None = None, seed: int = 0,
+                 lowpass_aug: tuple[float, ...] = ()):
         self.win, self.stride, self.out_win = win, stride, out_win
         # Mount-rotation augmentation. Every IO-VNBD phone lay flat, so without
         # this the raw body-frame channels have never seen a tilted handset --
@@ -189,6 +190,16 @@ class WindowDataset(Dataset):
         # exact rather than approximate.
         self.rotate_aug = rotate_aug
         self.max_tilt_deg = max_tilt_deg
+        # Sensor-tier augmentation. `sensor_tier.py` showed the speed head leans
+        # on high-frequency vibration, which is specific to this phone, mount,
+        # vehicle and road surface: low-passing held-out input at 2 Hz costs
+        # 2.11x at a 30 s blackout while heading is untouched. Training on a mix
+        # of native and low-passed copies removes the option of relying on any
+        # single band. Filtering is done PER RUN, once, up front -- the same way
+        # sensor_tier filters at evaluation time, so train and eval see the same
+        # transform. Filtering an 80-sample window instead would restart the
+        # causal gravity estimator inside every window and not match eval.
+        self.lowpass_aug = tuple(lowpass_aug)
         self.channels = None if channels is None else np.asarray(channels)
         self._rng = np.random.default_rng(seed)
         if out_win > win:
@@ -196,9 +207,15 @@ class WindowDataset(Dataset):
         self.arrays: dict[str, dict[str, np.ndarray]] = {}
         self.items: list[tuple[str, int]] = []      # (run_id, context end, exclusive)
 
+        self.tiers: dict[str, list[np.ndarray]] = {}
         for run in runs:
             a = run.load()
             self.arrays[run.run_id] = a
+            if self.lowpass_aug:
+                from .sensor_tier import simulate_tier
+                self.tiers[run.run_id] = [
+                    simulate_tier(a["features"], DT, hz).astype(np.float32)
+                    for hz in self.lowpass_aug]
             valid = a["valid"]
             n = len(valid)
             # The context [end-win, end) must be entirely valid; the output
@@ -241,7 +258,14 @@ class WindowDataset(Dataset):
     def __getitem__(self, i: int):
         run_id, end = self.items[i]
         a = self.arrays[run_id]
-        x = a["features"][end - self.win:end].T   # (C, W) causal context
+        feats = a["features"]
+        if self.lowpass_aug:
+            # Uniform over {native} U cutoffs, so the native tier keeps a real
+            # share of the batch rather than being crowded out.
+            k = int(self._rng.integers(0, len(self.lowpass_aug) + 1))
+            if k > 0:
+                feats = self.tiers[run_id][k - 1]
+        x = feats[end - self.win:end].T   # (C, W) causal context
         if self.rotate_aug:
             from .augment import rotate_window, tilt_rotation
             x = rotate_window(x.astype(np.float64),

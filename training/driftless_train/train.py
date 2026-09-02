@@ -161,6 +161,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rotate-aug", action="store_true",
                     help="augment training windows with random mount rotations")
     ap.add_argument("--max-tilt-deg", type=float, default=60.0)
+    ap.add_argument("--lowpass-aug", type=float, nargs="*", default=[],
+                    metavar="HZ",
+                    help="sensor-tier augmentation: also train on copies of "
+                         "each run low-passed at these cutoffs (Hz), so the "
+                         "model cannot rely on high-frequency vibration alone. "
+                         "Suggested: --lowpass-aug 4 2 1")
     ap.add_argument("--invariant-only", action="store_true",
                     help="train on the 5 gravity-projected, mount-invariant "
                          "channels only")
@@ -194,7 +200,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ds_tr = WindowDataset(parts["train"], win=args.win, stride=args.stride,
                           out_win=args.out_win, rotate_aug=args.rotate_aug,
-                          max_tilt_deg=args.max_tilt_deg, channels=chan_idx)
+                          max_tilt_deg=args.max_tilt_deg, channels=chan_idx,
+                          lowpass_aug=tuple(args.lowpass_aug))
     # Validation is never augmented: we want a stable yardstick across epochs.
     ds_va = WindowDataset(parts["val"], win=args.win, stride=args.out_win,
                           out_win=args.out_win, channels=chan_idx)
@@ -254,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
                 "out_win": args.out_win,
                 "channel_indices": None if chan_idx is None else chan_idx.tolist(),
                 "rotate_aug": args.rotate_aug, "width": args.width,
+                "lowpass_aug": list(args.lowpass_aug),
                 "epoch": min(out["history"],
                              key=lambda h: h["val_loss"])["epoch"]},
                MODEL_DIR / f"tcn_best{tag}.pt")
