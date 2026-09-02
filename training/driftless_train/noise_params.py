@@ -35,19 +35,43 @@ import torch
 
 from .dataset import DT, load_index, make_splits, split_runs
 from .evaluate import load_model, longest_valid_span, window_predictions
+from .pair import TRUSTED_COUPLING_CORR
 from .paths import METRIC_DIR, MODEL_DIR
 
 SPEED_BANDS = ((0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 25.0), (25.0, 40.0))
 
 
-def _decorrelation(residual: np.ndarray, win_dt: float,
+def _decorrelation(series: list[np.ndarray] | np.ndarray, win_dt: float,
                    max_lag: int = 40) -> dict:
-    """Autocorrelation of the residual series and its 1/e decorrelation time."""
-    x = residual - residual.mean()
-    denom = float(np.dot(x, x))
-    if denom <= 0 or len(x) < max_lag + 2:
+    """Autocorrelation of the residual series and its 1/e decorrelation time.
+
+    Takes a LIST of per-run series and averages their autocorrelations, weighted
+    by length. Concatenating first would be wrong: each run has its own mean
+    residual (they differ by ~1 m/s between held-out routes), so the joins act
+    as step changes and inflate the autocorrelation at every lag. Doing exactly
+    that made the apparent decorrelation time jump 8 s -> 20 s purely from
+    pooling a second route, which would have propagated into the filter's sigma
+    inflation as a factor of 3.16 instead of 2.
+    """
+    runs = [series] if isinstance(series, np.ndarray) else list(series)
+    runs = [np.asarray(r, dtype=float) for r in runs if len(r) >= max_lag + 2]
+    if not runs:
         return {"lag1": None, "decorrelation_s": None, "acf": []}
-    acf = [float(np.dot(x[:-k], x[k:]) / denom) for k in range(1, max_lag + 1)]
+
+    num = np.zeros(max_lag)
+    wsum = 0.0
+    for r in runs:
+        x = r - r.mean()            # de-mean PER RUN
+        denom = float(np.dot(x, x))
+        if denom <= 0:
+            continue
+        w = float(len(x))
+        for k in range(1, max_lag + 1):
+            num[k - 1] += w * float(np.dot(x[:-k], x[k:]) / denom)
+        wsum += w
+    if wsum <= 0:
+        return {"lag1": None, "decorrelation_s": None, "acf": []}
+    acf = list(num / wsum)
 
     tau = None
     for k, v in enumerate(acf, start=1):
@@ -61,14 +85,29 @@ def _decorrelation(residual: np.ndarray, win_dt: float,
     }
 
 
-def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
+def analyse(ckpt, splits: tuple[str, ...] = ("test", "val"),
+            device: str = "cpu") -> dict:
+    """Residual statistics over EVERY held-out split, not one route.
+
+    Originally this ran on `test` alone, which is a single route, and published
+    a sigma of 2.2046 m/s plus a bias of +0.4853 m/s as if both were properties
+    of the model. Neither is: on the other held-out route the residual sigma is
+    3.159 m/s and the bias is -0.554 m/s. The fusion filter consumed the
+    single-route numbers, so the sigma it was given was ~30 % optimistic --
+    exactly the over-tight-sigma failure that filter already documents
+    elsewhere. Pooling across held-out routes is the conservative default.
+    """
     dev = torch.device(device)
     model, win, out_win, chan_idx = load_model(ckpt, dev)
 
-    runs, _ = load_index()
-    sel = split_runs(runs, make_splits(runs))[split]
+    runs, idx = load_index()
+    by_split = split_runs(runs, make_splits(runs))
+    coupling = {r["run_id"]: abs(r.get("align_corr", 0.0) or 0.0)
+                for r in idx["runs"]}
+    sel = [r for sp in splits for r in by_split.get(sp, [])
+           if coupling.get(r.run_id, 0.0) >= TRUSTED_COUPLING_CORR]
     if not sel:
-        raise SystemExit(f"no runs in split '{split}'")
+        raise SystemExit(f"no trusted runs in splits {list(splits)}")
 
     sp_res, dp_res, dv_res, sp_true = [], [], [], []
     per_run = []
@@ -122,8 +161,8 @@ def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
                                                max(vt[m].mean(), 1e-6)), 4),
         })
 
-    corr_sp = _decorrelation(np.concatenate(sp_res), win_dt)
-    corr_dp = _decorrelation(np.concatenate(dp_res), win_dt)
+    corr_sp = _decorrelation(sp_res, win_dt)
+    corr_dp = _decorrelation(dp_res, win_dt)
 
     def inflation(corr):
         """sqrt of the effective number of correlated samples per decorrelation
@@ -134,8 +173,29 @@ def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
             return 1.0
         return round(float(np.sqrt(tau / win_dt)), 3)
 
+    # Per-split residual stats: the spread between them is the point. A single
+    # split's sigma and bias are not properties of the model.
+    by_split_stats = []
+    for sp_name in splits:
+        ids = {r.run_id for r in by_split.get(sp_name, [])}
+        rows = [x for x in per_run if x["run_id"] in ids]
+        if not rows:
+            continue
+        n = sum(x["n"] for x in rows)
+        by_split_stats.append({
+            "split": sp_name, "n": n,
+            "routes": sorted({r.route for r in by_split.get(sp_name, [])
+                              if r.run_id in {x["run_id"] for x in rows}}),
+            "speed_sigma_mps": round(float(np.sqrt(
+                sum(x["n"] * x["speed_sigma"] ** 2 for x in rows) / n)), 4),
+            "speed_bias_mps": round(float(
+                sum(x["n"] * x["speed_bias"] for x in rows) / n), 4),
+        })
+
     return {
-        "split": split,
+        "splits": list(splits),
+        "by_split": by_split_stats,
+        "bias_is_route_dependent": True,
         "checkpoint": str(ckpt),
         "context_s": round(win * DT, 2),
         "update_interval_s": round(win_dt, 2),
@@ -162,7 +222,7 @@ def analyse(ckpt, split: str = "test", device: str = "cpu") -> dict:
             "mae_mps": round(float(np.abs(np.concatenate(dv_res)).mean()), 4),
             "definition": "v[end-1] - v[start] within the output interval, "
                           "matching dataset.window_targets",
-            "correlation": _decorrelation(np.concatenate(dv_res), win_dt),
+            "correlation": _decorrelation(dv_res, win_dt),
         },
         "per_run": per_run,
     }
@@ -174,16 +234,48 @@ def write_markdown(res: dict, path) -> None:
     L = [
         "# Measurement noise for the fusion filter",
         "",
-        f"From residuals on the held-out **{res['split']}** split "
+        f"From residuals pooled over the held-out "
+        f"**{'** and **'.join(res['splits'])}** splits "
         f"({res['n_windows']} predictions, {res['update_interval_s']} s apart, "
         f"{res['context_s']} s context).",
         "",
         "## Forward-speed measurement",
         "",
+        "> **Do not hard-code the bias.** These values are pooled over every "
+        "held-out route. Bias is not a stable property of this model: it is a "
+        "property of each route's speed distribution interacting with a "
+        "shrinkage estimator, and it changes sign between held-out routes (see "
+        "the per-split table below). Subtracting one route's bias measurably "
+        "hurts on another. Use **0.0** unless you have calibrated on the actual "
+        "deployment route.",
+        "",
         f"- sigma **{sp['sigma_mps']} m/s**, bias {sp['bias_mps']} m/s, "
         f"MAE {sp['mae_mps']} m/s, p95 |error| {sp['p95_abs_mps']} m/s",
         "",
         "Error scales with speed, so a single sigma is wrong across the range:",
+        "",
+        "### Per held-out split — why one route is not enough",
+        "",
+        "| split | routes | n | speed sigma (m/s) | speed bias (m/s) |",
+        "|---|---|---|---|---|",
+        *[f"| {b['split']} | {', '.join(b['routes'])} | {b['n']} | "
+          f"**{b['speed_sigma_mps']}** | {b['speed_bias_mps']:+} |"
+          for b in res.get("by_split", [])],
+        "",
+        "Sigma differs by ~40 % between held-out routes and the bias changes "
+        "sign. Use the pooled sigma above; an over-tight sigma is the failure "
+        "mode that collapses the filter's covariance and makes it reject honest "
+        "GNSS fixes.",
+        "",
+        "> **This table is NOT a calibration curve.** It bins by *true* speed, "
+        "which the filter cannot observe, and a minimum-MSE estimator "
+        "necessarily looks biased when conditioned on the truth -- it shrinks "
+        "toward the mean, measured here at std(pred)/std(true) = 0.84 with a "
+        "pred-on-true slope of 0.74. Correcting that de-shrinks the estimate "
+        "and *raises* MSE. Cross-fitting a linear correction between the two "
+        "held-out routes made speed MAE worse in both directions "
+        "(1.54 -> 1.69 and 2.06 -> 2.25 m/s). This table shows where the error "
+        "lives; it is not meant to be inverted.",
         "",
         "| speed band | n | sigma (m/s) | bias (m/s) | sigma / mean speed |",
         "|---|---|---|---|---|",
@@ -250,7 +342,7 @@ def write_markdown(res: dict, path) -> None:
         "};",
         "Eigen::MatrixXd sqrt_R(1, 1);",
         f"sqrt_R(0, 0) = {sp['sigma_mps']} * {infl};"
-        "   // sigma x correlation inflation",
+        "   // pooled held-out sigma x correlation inflation",
         "engine.updateUnscented(h, z_from_model, sqrt_R, 0.99);",
         "```",
         "",
@@ -273,11 +365,12 @@ def write_markdown(res: dict, path) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default=str(MODEL_DIR / "tcn_best.pt"))
-    ap.add_argument("--split", default="test")
+    ap.add_argument("--splits", nargs="+", default=["test", "val"],
+                    help="held-out splits to pool over (default: test val)")
     args = ap.parse_args(argv)
 
     from pathlib import Path
-    res = analyse(Path(args.ckpt), args.split)
+    res = analyse(Path(args.ckpt), tuple(args.splits))
     METRIC_DIR.mkdir(parents=True, exist_ok=True)
     (METRIC_DIR / "measurement_noise.json").write_text(json.dumps(res, indent=2))
     write_markdown(res, METRIC_DIR / "measurement_noise.md")

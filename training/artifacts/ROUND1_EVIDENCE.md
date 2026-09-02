@@ -91,10 +91,10 @@ Related correctness note: gravity is estimated with a **causal** one-pole filter
 
 Full detail in `artifacts/metrics/measurement_noise.md`.
 
-- Forward speed: sigma **2.2046 m/s**, bias **+0.485 m/s**, with a per-speed-band table since the error scales with speed.
-- Speed change (`dv`): sigma **0.8471 m/s**, bias **-0.0053 m/s** — essentially unbiased, and the better-conditioned of the two speed outputs.
-- Heading change: sigma **1.4537°** per 2.0 s.
-- **Residuals are time-correlated**: speed lag-1 autocorrelation **0.7367**, decorrelation time **8.0 s** — the same as the context length. Feeding one measurement per 2.0 s as if independent over-informs the filter by about **2.0×** in sigma.
+- Forward speed: sigma **2.893 m/s**, bias **-0.177 m/s**, with a per-speed-band table since the error scales with speed.
+- Speed change (`dv`): sigma **0.7968 m/s**, bias **-0.0220 m/s** — essentially unbiased, and the better-conditioned of the two speed outputs.
+- Heading change: sigma **1.415°** per 2.0 s.
+- **Residuals are time-correlated**: speed lag-1 autocorrelation **0.7662**, decorrelation time **8.0 s** — the same as the context length. Feeding one measurement per 2.0 s as if independent over-informs the filter by about **2.0×** in sigma.
 
 The measurement is the longitudinal body-velocity component — the one axis the non-holonomic constraint deliberately leaves free — so it fits the existing unscented update with no new filter code.
 
