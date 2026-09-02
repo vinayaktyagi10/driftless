@@ -147,6 +147,41 @@ def _causal_gravity(acc: np.ndarray, dt_s: float,
     return out
 
 
+def imu_derived(acc: np.ndarray, gyr: np.ndarray, dt_s: float,
+                grav_fallback: np.ndarray | None = None
+                ) -> dict[str, np.ndarray]:
+    """Compute the five attitude-invariant channels from raw acc/gyro arrays.
+
+    Array-level core shared by preprocessing and by `sensor_tier`, which needs to
+    recompute these after altering the raw channels. Kept as one implementation
+    because `acc_norm` is nonlinear: filtering the derived channels is NOT the
+    same as filtering the raw axes and re-deriving, so a second copy of this
+    maths would silently diverge.
+
+    `acc` and `gyr` are (N, 3); `gyr` columns must already be in the physical
+    x/y/z order of GYRO_XYZ_COLUMNS.
+    """
+    lp = _causal_gravity(acc, dt_s=dt_s)
+    if not np.isfinite(lp).all() and grav_fallback is not None:
+        lp = grav_fallback
+    g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
+    # Where the estimate is degenerate, fall back to the reported gravity, then
+    # to +Z, so the projection stays finite. Such rows are flagged invalid anyway.
+    g_hat = np.where(g_norm > 1e-3, lp / np.maximum(g_norm, 1e-9),
+                     np.array([0.0, 0.0, 1.0]))
+
+    acc_norm = np.linalg.norm(acc, axis=1)
+    acc_vert = np.einsum("ij,ij->i", acc, g_hat)
+    acc_horiz = np.sqrt(np.maximum(acc_norm**2 - acc_vert**2, 0.0))
+
+    gyro_vert = np.einsum("ij,ij->i", gyr, g_hat)
+    gyro_norm = np.linalg.norm(gyr, axis=1)
+    gyro_horiz = np.sqrt(np.maximum(gyro_norm**2 - gyro_vert**2, 0.0))
+
+    return {"acc_norm": acc_norm, "acc_vert": acc_vert, "acc_horiz": acc_horiz,
+            "gyro_vert": gyro_vert, "gyro_horiz": gyro_horiz}
+
+
 def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     """Project the IMU onto the gravity frame to get attitude-invariant channels.
 
@@ -162,30 +197,10 @@ def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     acc = df[["acc_x", "acc_y", "acc_z"]].to_numpy(dtype=float)
     gyr = df[list(GYRO_XYZ_COLUMNS)].to_numpy(dtype=float)
     grv = df[["grav_x", "grav_y", "grav_z"]].to_numpy(dtype=float)
+    dt_s = float(np.median(np.diff(df["t_s"].to_numpy())) if len(df) > 1 else 0.1)
 
-    lp = _causal_gravity(acc, dt_s=float(np.median(np.diff(df["t_s"].to_numpy()))
-                                         if len(df) > 1 else 0.1))
-    if not np.isfinite(lp).all():
-        lp = grv
-    g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
-    # Where the estimate is degenerate, fall back to the reported gravity, then
-    # to +Z, so the projection stays finite. Such rows are flagged invalid anyway.
-    g_hat = np.where(g_norm > 1e-3, lp / np.maximum(g_norm, 1e-9),
-                     np.array([0.0, 0.0, 1.0]))
-
-    acc_norm = np.linalg.norm(acc, axis=1)
-    acc_vert = np.einsum("ij,ij->i", acc, g_hat)
-    acc_horiz = np.sqrt(np.maximum(acc_norm**2 - acc_vert**2, 0.0))
-
-    gyro_vert = np.einsum("ij,ij->i", gyr, g_hat)
-    gyro_norm = np.linalg.norm(gyr, axis=1)
-    gyro_horiz = np.sqrt(np.maximum(gyro_norm**2 - gyro_vert**2, 0.0))
-
-    df["acc_norm"] = acc_norm
-    df["acc_vert"] = acc_vert
-    df["acc_horiz"] = acc_horiz
-    df["gyro_vert"] = gyro_vert
-    df["gyro_horiz"] = gyro_horiz
+    for name, col in imu_derived(acc, gyr, dt_s, grav_fallback=grv).items():
+        df[name] = col
     return df
 
 

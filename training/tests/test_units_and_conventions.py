@@ -122,7 +122,11 @@ def test_gravity_comes_from_a_causal_lowpass_of_the_accelerometer():
 
     from driftless_train import preprocess
 
-    src = inspect.getsource(preprocess._add_imu_features)
+    # The derived channels are computed by `imu_derived`, which
+    # `_add_imu_features` delegates to; check the whole chain so moving the maths
+    # between them cannot quietly drop the causal estimator.
+    src = (inspect.getsource(preprocess._add_imu_features)
+           + inspect.getsource(preprocess.imu_derived))
     assert "_causal_gravity" in src, "attitude must use the causal estimator"
     assert 'mode="same"' not in src, "centred filter reintroduced -- non-causal"
 

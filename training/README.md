@@ -27,6 +27,7 @@ python -m driftless_train.evaluate --split val --sweep-alpha   # tune the blend
 python -m driftless_train.evaluate --split test                # report numbers
 python -m driftless_train.export      # ONNX + TFLite, with parity checks
 python -m driftless_train.crossval --k 5   # route-wise CV: the honest headline
+python -m driftless_train.sensor_tier      # does the model transfer to a cleaner IMU?
 python -m driftless_train.noise_params     # measurement noise for role 02's UKF
 python -m driftless_train.allan            # IMU noise characterisation
 python -m driftless_train.report      # assemble ROUND1_EVIDENCE.md
@@ -382,6 +383,64 @@ with enough samples the 30 s median spans **32.45 m (S/S1) to 59.72 m
 (Vta/Vta02)**, a factor of 1.8 — precisely why one held-out road is not enough.
 Rebuild the tables from saved samples with `python -m driftless_train.crossval
 --rebuild-docs`; full detail in `artifacts/metrics/crossval.md`.
+
+## The speed head reads vibration — and that is a real limitation
+
+Role 04/05 asked whether the edge engine can reuse this model on FOG-grade
+inertial input. Answering it turned up something that matters more for our own
+model than for the edge tier.
+
+There is **no FOG-grade data in IO-VNBD** to test against, so the shift is
+simulated instead: low-pass the held-out phone channels and re-derive the
+attitude-invariant features. That removes the high-frequency content a cleaner
+sensor would not have, and simultaneously simulates the anti-alias filtering
+that decimating a 200 Hz FOG stream to 10 Hz applies. Ratios are paired per
+route against that route's own native result, so route difficulty cancels.
+
+| tier | acc HF removed | speed MAE | Δψ MAE | 30 s blackout |
+|---|---|---|---|---|
+| native phone | — | 1.00× | 1.00× | 1.00× (32.67 m) |
+| low-pass 4 Hz | 11 % | 1.108× | 0.987× | **1.024×** (33.58 m) |
+| low-pass 2 Hz | 33 % | 2.288× | 1.015× | **2.107×** (69.81 m) |
+| low-pass 1 Hz | 45 % | 3.446× | 1.038× | **3.496×** (114.99 m) |
+| low-pass 0.5 Hz | 50 % | 4.035× | 1.05× | **4.32×** (142.02 m) |
+
+**Heading is untouched; speed collapses.** Δψ error stays within 1.05× at every
+cutoff, while speed MAE degrades up to 4.0×. The reason is that the band being
+removed is not noise — it is a speed cue. Across 3 held-out runs (7081 windows)
+high-frequency energy correlates with true speed at **+0.640** (range +0.494 to
++0.722 by route, which is road surface):
+
+| speed band | n | HF accel RMS (m/s²) |
+|---|---|---|
+| 0–2 m/s | 1275 | 0.2845 |
+| 2–5 m/s | 662 | 0.5527 |
+| 5–10 m/s | 2212 | 0.7794 |
+| 10–15 m/s | 1999 | 1.007 |
+| 15–20 m/s | 551 | 0.9102 |
+| 20–30 m/s | 379 | 0.8929 |
+
+Road, tyre and engine vibration grows with speed, so the model has learned to
+use vibration amplitude as a partial speedometer. Note it **saturates above ~10
+m/s** — it separates 0 from 10 m/s well and 20 from 30 m/s barely. Yaw rate
+needs no such cue, because heading dynamics live below 2 Hz.
+
+Two consequences, and the second is the important one:
+
+1. **The edge tier needs its own model and its own data.** Reusing this one on
+   decimated FOG input removes precisely the band its speed head depends on.
+2. **A different vehicle or handset is an untested shift for the shipped model.**
+   The cross-validation varied route and driver but held vehicle, handset and
+   mount fixed, so it is blind to this dependence by construction. The reported
+   numbers do not cover a different car, tyres, mount or phone.
+
+The plausible fix is the same shape as the one that fixed mount sensitivity:
+train with low-pass augmentation so the model cannot lean on any single
+frequency band, accepting some absolute accuracy for robustness. That is a
+training run and a deliberate trade, not done yet.
+
+`python -m driftless_train.sensor_tier`; detail in
+`artifacts/metrics/sensor_tier.md`.
 
 ## Evaluation: the question a judge will ask
 

@@ -32,6 +32,16 @@ def _load(path: Path):
     return path.read_text()
 
 
+def _tier_ratio(tier: dict | None, cutoff_hz: float) -> float | None:
+    """30 s error ratio at one low-pass cutoff, from the sensor-tier study."""
+    if not tier:
+        return None
+    for row in tier.get("summary", []):
+        if abs(row.get("cutoff_hz", -1) - cutoff_hz) < 1e-9:
+            return row.get("med_30s_ratio")
+    return None
+
+
 def _ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
         return f"{n}th"
@@ -56,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     noise = _load(METRIC_DIR / "measurement_noise.json")
     allan = _load(METRIC_DIR / "allan_imu_noise.json")
     cv = _load(METRIC_DIR / "crossval.json")
+    tier = _load(METRIC_DIR / "sensor_tier.json")
     ckpt_meta = {}
     ck_path = MODEL_DIR / "tcn_best.pt"
     if ck_path.exists():
@@ -407,6 +418,19 @@ def main(argv: list[str] | None = None) -> int:
         "of inertial-only odometry. Closing the rest is what the road-network "
         "constraint (map matching) and the EKF in role 02 are for — a vehicle on "
         "a known road cannot be anywhere the map does not allow.",
+        "- **The speed head partly reads vibration, so a different vehicle or "
+        "handset is an untested shift.** Low-passing the held-out input at 2 Hz "
+        "costs "
+        + (f"{_tier_ratio(tier, 2.0):.1f}× " if _tier_ratio(tier, 2.0) else "")
+        + "at a 30 s blackout while heading-change error is unchanged, and "
+        "high-frequency energy correlates with true speed at "
+        + (f"{tier['mechanism']['corr_hf_acc_speed_mean']:+.2f} "
+           if tier and tier.get("mechanism") else "")
+        + "across held-out runs. Road, tyre and engine vibration grows with "
+        "speed, and the model uses it. That cue is specific to this sensor, "
+        "mount, vehicle and road surface, and the cross-validation held all four "
+        "fixed — so it cannot see this dependence. See "
+        "`artifacts/metrics/sensor_tier.md`.",
         "- Trained on IO-VNBD: UK/France/Nigeria, one phone, one vehicle. Indian "
         "roads and other handsets are the fine-tuning step the roadmap already "
         "sequences (pre-train public → fine-tune own captures).",

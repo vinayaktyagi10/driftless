@@ -1,7 +1,7 @@
 # Driftless — Round 1 evidence
 
 SIH 2026 · PS #26168 (ISRO) · role 03 (data + model training)
-Generated 2026-09-01 from the artifacts in this repo.
+Generated 2026-09-02 from the artifacts in this repo.
 
 ## 1. What was built
 
@@ -143,6 +143,7 @@ Normalisation is baked into both graphs, so the phone and the C++ engine cannot 
 ## 10. Honest limitations
 
 - **The regressor alone does not reach the <10 m at 30 s target.** It reaches roughly that at a 10 s blackout; at 30 s the residual is dominated by absolute-speed error, which is the fundamentally hard part of inertial-only odometry. Closing the rest is what the road-network constraint (map matching) and the EKF in role 02 are for — a vehicle on a known road cannot be anywhere the map does not allow.
+- **The speed head partly reads vibration, so a different vehicle or handset is an untested shift.** Low-passing the held-out input at 2 Hz costs 2.1× at a 30 s blackout while heading-change error is unchanged, and high-frequency energy correlates with true speed at +0.64 across held-out runs. Road, tyre and engine vibration grows with speed, and the model uses it. That cue is specific to this sensor, mount, vehicle and road surface, and the cross-validation held all four fixed — so it cannot see this dependence. See `artifacts/metrics/sensor_tier.md`.
 - Trained on IO-VNBD: UK/France/Nigeria, one phone, one vehicle. Indian roads and other handsets are the fine-tuning step the roadmap already sequences (pre-train public → fine-tune own captures).
 - IO-VNBD phone data is 10 Hz; our own captures target 100 Hz. The window is defined in seconds, so the design carries over — but it needs retraining, not just reuse.
 - Ground truth is the vehicle's own CAN + survey GNSS, so labels inherit its ~0.2 % self-consistency floor.
