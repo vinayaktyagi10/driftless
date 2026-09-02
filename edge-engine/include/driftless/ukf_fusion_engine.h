@@ -117,12 +117,16 @@ public:
     };
 
     struct VelocityModelParams {
-        // Held-out residuals of the learned speed/heading model, 8s context /
-        // 2s output interval (training/artifacts/metrics/measurement_noise.md).
-        double sigma_mps = 2.2046;
-        // Systematic bias on the held-out route. Subtracted before the
-        // measurement is treated as unbiased.
-        double bias_mps = 0.4853;
+        // Held-out residuals of the learned speed/heading model, pooled across
+        // BOTH held-out routes (training/artifacts/metrics/measurement_noise.md).
+        // A single-route figure (2.2046) was ~30% optimistic.
+        double sigma_mps = 2.893;
+        // Not a sensor offset -- it changes sign between held-out routes
+        // (+0.4853 on one, -0.5536 on the other), so it is a property of each
+        // route's speed distribution interacting with a shrinkage estimator,
+        // not something safe to correct for at inference time. Left at 0.0 and
+        // kept as a field for future per-deployment calibration only.
+        double bias_mps = 0.0;
 
         // Consecutive predictions share most of their 8s context, so their
         // errors are NOT independent -- lag-1 autocorrelation 0.7367,
