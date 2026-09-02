@@ -245,6 +245,69 @@ TEST(NonHolonomic, SharpensHeadingKnowledgeWithoutAnyPositionFix) {
               << " deg -> " << std::sqrt(yaw_variance_after) * 180 / M_PI << " deg\n";
 }
 
+// --- Learned velocity model --------------------------------------------
+
+TEST(VelocityModel, PullsForwardSpeedTowardTheBiasCorrectedPrediction) {
+    // Mid-blackout velocity uncertainty has grown well past the default
+    // (this measurement's entire reason to exist is bounding along-track
+    // drift during exactly that window), so start there: the filter believes
+    // 12 m/s with sigma 3 m/s/s, the model says 16 m/s.
+    NavState state;
+    state.velocity = Vec3(12.0, 0.0, 0.0);
+    auto engine =
+        makeEngine(state, diagonalSqrtCovariance(/*position=*/50.0, /*velocity=*/3.0,
+                                                  /*attitude_deg=*/5.0));
+
+    const double raw_prediction_mps = 16.0 + UkfFusionEngine::Config{}.velocity_model.bias_mps;
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_EQ(engine.updateVelocityModel(raw_prediction_mps), Outcome::kApplied)
+            << "iteration " << i;
+    }
+
+    const double forward_speed =
+        UkfFusionEngine::bodyVelocity(engine.state()).x();
+    std::cout << "[ INFO     ] forward speed 12 -> " << forward_speed << " m/s\n";
+    EXPECT_GT(forward_speed, 15.0);
+    EXPECT_LT(forward_speed, 16.5);
+}
+
+TEST(VelocityModel, CorrectsTheDocumentedSystematicBiasBeforeUpdating) {
+    // A single update, well within the gate on both counts (wide prior,
+    // tight measurement noise), should land near (measurement - bias), not
+    // near the raw measurement.
+    NavState state;
+    state.velocity = Vec3(10.0, 0.0, 0.0);
+    UkfFusionEngine::Config config;
+    config.velocity_model.sigma_mps = 0.1;
+    config.velocity_model.correlation_inflation = 1.0;
+    auto engine =
+        UkfFusionEngine(state, diagonalSqrtCovariance(/*position=*/50.0, /*velocity=*/5.0,
+                                                       /*attitude_deg=*/5.0),
+                        ImuNoiseParams::fogGrade(), config);
+
+    const double raw_prediction_mps = 14.0;
+    ASSERT_EQ(engine.updateVelocityModel(raw_prediction_mps), Outcome::kApplied);
+
+    const double expected = raw_prediction_mps - config.velocity_model.bias_mps;
+    const double forward_speed =
+        UkfFusionEngine::bodyVelocity(engine.state()).x();
+    EXPECT_NEAR(forward_speed, expected, 0.1);
+}
+
+TEST(VelocityModel, RejectsAPredictionThatDisagreesWithEverythingElse) {
+    // NIS gating applies here exactly as it does to GNSS and NHC: a prediction
+    // wildly inconsistent with the current estimate and its covariance should
+    // be rejected rather than dragging the state toward it.
+    NavState state;
+    state.velocity = Vec3(15.0, 0.0, 0.0);
+    auto engine = makeEngine(state, diagonalSqrtCovariance(/*position=*/5.0,
+                                                            /*velocity=*/0.1,
+                                                            /*attitude_deg=*/1.0));
+
+    EXPECT_EQ(engine.updateVelocityModel(500.0), Outcome::kRejectedByGate);
+    EXPECT_EQ(engine.diagnostics().velocity_model_rejected, 1);
+}
+
 // --- The two update paths must agree where they overlap --------------------
 
 TEST(UpdatePaths, UnscentedAgreesWithLinearOnALinearMeasurement) {
