@@ -135,7 +135,7 @@ The measurement is the longitudinal body-velocity component — the one axis the
 ## 9. Deployment artefacts
 
 - **38,499 parameters**, input `[1, 14, 80]`, outputs `speed_ms, dpsi_rad, dv_ms` in SI units.
-- **ONNX** (C++ edge engine, roles 04–05): 218.3 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1077 ms/window** on CPU.
+- **ONNX** (C++ edge engine, roles 04–05): 218.3 KB, matches PyTorch to **2.27e-06** relative on real windows, **0.1158 ms/window** on CPU.
 - **TFLite** (Android app, role 01): 182.3 KB, matches PyTorch to **1.51e-06** relative.
 
 Normalisation is baked into both graphs, so the phone and the C++ engine cannot disagree with training about scaling.

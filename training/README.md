@@ -493,8 +493,8 @@ memorise a road instead of learning vehicle dynamics.
 
 | | Size | Parity vs PyTorch | Latency | Input |
 |---|---|---|---|---|
-| **ONNX** (C++ edge engine) | 218.3 KB (one self-contained file) | 2.3e-06 rel | 0.108 ms/window | `[1, 14, 80]` **NCW** |
-| **TFLite** (Android app) | 182.3 KB | 1.5e-06 rel | 0.066 ms/window | `[1, 80, 14]` **NWC** |
+| **ONNX** (C++ edge engine) | 218.3 KB (one self-contained file) | 2.3e-06 rel | 0.116 ms/window | `[1, 14, 80]` **NCW** |
+| **TFLite** (Android app) | 182.3 KB | 1.5e-06 rel | 0.068 ms/window | `[1, 80, 14]` **NWC** |
 
 Note the layouts differ — TFLite is channels-last (time-major), which is the
 natural layout for an Android ring buffer anyway. Parity is asserted numerically
@@ -600,18 +600,28 @@ python export/to_tflite.py --copy-to-consumers
 `artifacts/metrics/measurement_noise.md` derives the filter's measurement noise
 from held-out residuals, in the terms the UKF reasons about:
 
-- Forward-speed measurement: **σ = 2.20 m/s**, with a **+0.49 m/s systematic
-  bias** on the held-out route, and a per-speed-band table because the error
-  scales with speed.
-- Heading change: **σ = 1.45°** per 2 s.
+- Forward-speed measurement: **σ = 2.893 m/s**, pooled over both
+  held-out routes, with a per-speed-band table because the error scales with
+  speed. An earlier version of this section quoted **σ = 2.20** from the *test*
+  split alone — one route — which is ~30 % optimistic and was corrected here
+  and in role 02's filter.
+- **Do not hard-code the bias.** It is not a property of the model: it is
+  **+0.4853 m/s** on S/S1 and
+  **-0.5536 m/s** on S/S4 — it
+  changes sign between held-out routes, because it comes from each route's speed
+  distribution interacting with a shrinkage estimator, not from a sensor offset.
+  Applying one route's value to the other measurably worsens both bias and MAE.
+  Use **0.0** unless you have a per-deployment calibration.
+- Heading change: **σ = 1.415°** per 2 s.
 - **The correlation warning.** Consecutive predictions share most of their 8 s
   context, so the residuals are not independent: speed lag-1 autocorrelation
-  **0.74**, decorrelation time **8 s** — exactly the context length. Feeding one
-  measurement every 2 s as if independent over-informs the filter by about
-  **2×** in σ. This is the same trap `ukf_fusion_engine.h` already documents for
-  the non-holonomic constraint, where an over-tight σ at high rate collapsed the
-  attitude covariance and made the filter reject 21 honest GNSS fixes after a
-  blackout.
+  **0.7662**, decorrelation time
+  **8 s** — exactly the context length.
+  Feeding one measurement every 2 s as if independent over-informs the filter by
+  about **2×** in σ. This is the same trap
+  `ukf_fusion_engine.h` already documents for the non-holonomic constraint, where
+  an over-tight σ at high rate collapsed the attitude covariance and made the
+  filter reject 21 honest GNSS fixes after a blackout.
 
 The measurement is the **longitudinal** body-velocity component — the one axis
 the non-holonomic constraint deliberately leaves free — so it fits the existing

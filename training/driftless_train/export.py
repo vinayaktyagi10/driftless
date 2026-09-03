@@ -39,12 +39,18 @@ STRIP_KEYS = ("pkg.torch.onnx.stack_trace",)
 
 
 
-def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0) -> np.ndarray:
+def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0,
+                  channels: np.ndarray | None = None) -> np.ndarray:
     """Windows for parity testing: real recorded ones if we have them.
 
     Synthetic Gaussian noise is a poor parity test -- it lands far outside the
     input distribution, where the graphs can differ in ways that never occur in
     service. Real windows test the region the model actually operates in.
+
+    `channels` is the checkpoint's channel subset (`--invariant-only` trains on 5
+    of the 14). The .npz files always hold all 14, so without subsetting here an
+    invariant-only export fed the model 14 channels and crashed instead of
+    exporting.
     """
     from .dataset import PROC_DIR
     proc = sorted(PROC_DIR.glob("*.npz"))
@@ -56,13 +62,19 @@ def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0) -> np.ndarray
             step = max((len(feats) - win) // 32, 1)
             for start in range(0, len(feats) - win, step):
                 if valid[start:start + win].all():
-                    xs.append(feats[start:start + win].T)
+                    w = feats[start:start + win].T
+                    xs.append(w if channels is None else w[channels])
                 if len(xs) >= n:
                     break
             if len(xs) >= n:
                 break
         if len(xs) >= 8:
-            return np.stack(xs[:n]).astype(np.float32)
+            out = np.stack(xs[:n]).astype(np.float32)
+            if out.shape[1] != n_ch:
+                raise ValueError(
+                    f"sampled windows have {out.shape[1]} channels but the "
+                    f"checkpoint expects {n_ch}")
+            return out
 
     rng = np.random.default_rng(seed)
     x = rng.normal(0.0, 1.0, size=(n, n_ch, win)).astype(np.float32)
@@ -119,7 +131,8 @@ def _strip_debug_info(path: Path) -> int:
     return before - path.stat().st_size
 
 
-def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
+def export_onnx(model, n_ch: int, win: int, out: Path,
+                channels: np.ndarray | None = None) -> dict:
     dummy = torch.zeros(1, n_ch, win, dtype=torch.float32)
     # external_data=False keeps the weights INSIDE the .onnx. The default split
     # them into a sidecar .onnx.data whose filename is recorded inside the model,
@@ -138,7 +151,7 @@ def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
 
     import onnxruntime as ort
     sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
-    X = sample_inputs(n_ch, win)
+    X = sample_inputs(n_ch, win, channels=channels)
     with torch.no_grad():
         y_torch = model(torch.from_numpy(X)).numpy()
     y_onnx = sess.run(["speed_dpsi"], {"imu_window": X})[0]
@@ -162,7 +175,8 @@ def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
 
 
 def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
-                  dilations: tuple[int, ...], model) -> dict:
+                  dilations: tuple[int, ...], model,
+                  channels: np.ndarray | None = None) -> dict:
     """Export TFLite by rebuilding the network in Keras and porting the weights.
 
     Not by converting the ONNX: onnx2tf mistranslates the residual connection in
@@ -181,7 +195,7 @@ def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
 
     km = keras_from_checkpoint(model, n_ch, win, width, n_out, dilations)
 
-    X = sample_inputs(n_ch, win, n=48)            # (N, C, W)
+    X = sample_inputs(n_ch, win, n=48, channels=channels)            # (N, C, W)
     X_nwc = np.transpose(X, (0, 2, 1))            # Keras/TFLite are channels-last
     with torch.no_grad():
         y_torch = model(torch.from_numpy(X)).numpy()
@@ -241,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                        "SI-unit outputs."}
 
     onnx_path = args.out_dir / "tcn_speed_heading.onnx"
-    report["onnx"] = export_onnx(model, n_ch, win, onnx_path)
+    report["onnx"] = export_onnx(model, n_ch, win, onnx_path,
+                                 channels=chan_idx)
     r = report["onnx"]
     print(f"ONNX   {'PASS' if r['passed'] else 'FAIL'}  {r['size_kb']} KB  "
           f"max rel Δ {r['max_rel_diff']:.2e} (tol {r['tolerance_rel']:.0e})  "
@@ -253,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         report["tflite"] = export_tflite(
             args.out_dir, n_ch, win, ck["width"], model.n_out,
-            tuple(1 << i for i in range(len(model.blocks))), model)
+            tuple(1 << i for i in range(len(model.blocks))), model,
+            channels=chan_idx)
     t = report["tflite"]
     if t.get("skipped"):
         print(f"TFLite SKIP  {t.get('reason','')}")

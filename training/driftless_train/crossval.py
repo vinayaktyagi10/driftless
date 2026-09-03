@@ -85,11 +85,12 @@ def main(argv: list[str] | None = None) -> int:
 
     runs, idx = load_index()
     channels = idx["channels"]
-    trusted = {}
-    for r in json.loads((METRIC_DIR.parent.parent / "data" / "processed" /
-                         "index.json").read_text())["runs"]:
-        if abs(r.get("align_corr", 0.0)) >= TRUSTED_COUPLING_CORR:
-            trusted[r["run_id"]] = r["route"]
+    # One pass over the index `load_index` already returned. This used to
+    # re-read and re-parse data/processed/index.json twice more via a
+    # hand-rolled relative path, which both duplicated the trusted-run gate
+    # that pair.py owns and broke if the tree was laid out differently.
+    trusted = {r["run_id"]: r["route"] for r in idx["runs"]
+               if abs(r.get("align_corr", 0.0) or 0.0) >= TRUSTED_COUPLING_CORR}
 
     by_route: dict[str, float] = defaultdict(float)
     run_of_route: dict[str, list] = defaultdict(list)
@@ -98,8 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             by_route[run.route] += 0.0
             run_of_route[run.route].append(run)
     # durations from the index, so folds balance time rather than route count
-    for r in json.loads((METRIC_DIR.parent.parent / "data" / "processed" /
-                         "index.json").read_text())["runs"]:
+    for r in idx["runs"]:
         if r["run_id"] in trusted:
             by_route[r["route"]] += r["duration_s"]
 
@@ -195,6 +195,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  fold {i}: speed MAE {row['speed_mae_ms']:.3f} m/s  "
               f"dpsi {row['dpsi_mae_deg']:.2f} deg  "
               f"30s med {row['med_30s']} m", flush=True)
+        # Checkpoint the run after every fold. Each fold is a full 40-epoch
+        # train, so an interrupt at fold 4 of 5 previously discarded hours of
+        # compute that were already reduced to a few kilobytes of results.
+        METRIC_DIR.mkdir(parents=True, exist_ok=True)
+        (METRIC_DIR / "crossval_partial.json").write_text(json.dumps(
+            {"complete": False, "folds_done": len(fold_rows),
+             "folds_planned": args.k, "fold_rows": fold_rows,
+             "pooled_samples": pooled}, indent=2))
 
     if not fold_rows:
         print("no folds produced results")
@@ -205,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                      "win": args.win, "out_win": args.out_win})
     METRIC_DIR.mkdir(parents=True, exist_ok=True)
     (METRIC_DIR / "crossval.json").write_text(json.dumps(res, indent=2))
+    (METRIC_DIR / "crossval_partial.json").unlink(missing_ok=True)
     # Raw per-blackout rows: re-aggregating these costs nothing, retraining the
     # five folds to recover them costs the whole run.
     with (METRIC_DIR / "crossval_samples.csv").open("w", newline="") as fh:

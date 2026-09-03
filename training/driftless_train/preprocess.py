@@ -162,8 +162,16 @@ def imu_derived(acc: np.ndarray, gyr: np.ndarray, dt_s: float,
     x/y/z order of GYRO_XYZ_COLUMNS.
     """
     lp = _causal_gravity(acc, dt_s=dt_s)
-    if not np.isfinite(lp).all() and grav_fallback is not None:
-        lp = grav_fallback
+    # Repair ONLY the rows the recursion actually poisoned. `_causal_gravity` is
+    # a one-pole IIR filter, so a single non-finite sample at row j makes every
+    # row from j onward non-finite -- but rows before j are converged and valid.
+    # Swapping the whole run for the crude gravity column threw those away too,
+    # degrading acc_vert/acc_horiz/gyro_vert/gyro_horiz for the entire run
+    # because of one bad sample.
+    bad = ~np.isfinite(lp).all(axis=1)
+    if bad.any() and grav_fallback is not None:
+        lp = lp.copy()
+        lp[bad] = grav_fallback[bad]
     g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
     # Where the estimate is degenerate, fall back to the reported gravity, then
     # to +Z, so the projection stays finite. Such rows are flagged invalid anyway.

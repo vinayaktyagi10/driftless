@@ -201,7 +201,13 @@ class WindowDataset(Dataset):
         # causal gravity estimator inside every window and not match eval.
         self.lowpass_aug = tuple(lowpass_aug)
         self.channels = None if channels is None else np.asarray(channels)
-        self._rng = np.random.default_rng(seed)
+        # One INDEPENDENT stream per augmentation, spawned from the same
+        # seed. A single shared generator made the draws order-dependent:
+        # enabling --lowpass-aug consumed integers ahead of the rotation draw,
+        # so the same seed produced different rotations depending on which other
+        # flags were set, and no two flag combinations were comparable.
+        self._rng_lowpass, self._rng_rotate = (
+            np.random.default_rng(seed).spawn(2))
         if out_win > win:
             raise ValueError("out_win cannot exceed the context length")
         self.arrays: dict[str, dict[str, np.ndarray]] = {}
@@ -262,14 +268,15 @@ class WindowDataset(Dataset):
         if self.lowpass_aug:
             # Uniform over {native} U cutoffs, so the native tier keeps a real
             # share of the batch rather than being crowded out.
-            k = int(self._rng.integers(0, len(self.lowpass_aug) + 1))
+            k = int(self._rng_lowpass.integers(0, len(self.lowpass_aug) + 1))
             if k > 0:
                 feats = self.tiers[run_id][k - 1]
         x = feats[end - self.win:end].T   # (C, W) causal context
         if self.rotate_aug:
             from .augment import rotate_window, tilt_rotation
             x = rotate_window(x.astype(np.float64),
-                              tilt_rotation(self._rng, self.max_tilt_deg))
+                              tilt_rotation(self._rng_rotate,
+                                            self.max_tilt_deg))
         if self.channels is not None:
             x = x[self.channels]
         return (torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)),

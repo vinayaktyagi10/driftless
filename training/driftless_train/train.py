@@ -94,14 +94,24 @@ class FitConfig:
 
 
 def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
-        on_epoch=None) -> dict:
+        on_epoch=None, on_best=None, stats: dict | None = None) -> dict:
     """Train one model. Returns {model, stats, best_val, history}.
 
     `on_epoch(entry)` is called after every epoch with that epoch's history
     record, so callers can log however they like without this function knowing
-    anything about files.
+    anything about files. `on_best(state_dict, epoch)` is called whenever
+    validation improves, so a caller can persist the best weights as they appear
+    rather than only after the last epoch.
+
+    `stats` may be supplied by a caller that has already computed it. Do not let
+    it be recomputed: under `--rotate-aug`/`--lowpass-aug` the dataset is
+    stochastic and draws from a shared RNG, so a second `compute_stats` call
+    returns DIFFERENT numbers (measured: x_mean up to 0.065, x_std 0.56%). The
+    stats written to disk would then disagree with the ones baked into the
+    exported graph.
     """
-    stats = compute_stats(ds_tr)
+    if stats is None:
+        stats = compute_stats(ds_tr)
     device = pick_device(cfg.device)
     model = SpeedHeadingTCN(n_channels, width=cfg.width,
                             n_out=len(stats["y_mean"])).to(device)
@@ -132,6 +142,8 @@ def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
             best = va_loss
             best_state = {k: v.detach().clone() for k, v in
                           model.state_dict().items()}
+            if on_best is not None:
+                on_best(best_state, ep)
         if on_epoch is not None:
             on_epoch(history[-1])
 
@@ -252,20 +264,32 @@ def main(argv: list[str] | None = None) -> int:
               f"  dv MAE {va_mae[2]:.3f} m/s  ({e['secs']:.0f}s){flag}",
               flush=True)
 
-    out = fit(ds_tr, ds_va, len(channels), cfg, on_epoch=on_epoch)
+    ckpt_path = MODEL_DIR / f"tcn_best{tag}.pt"
+
+    def save(state_dict, epoch):
+        """Persist the best weights as soon as they appear.
+
+        Written on every improving epoch, not once at the end: a 40-epoch run
+        that is interrupted (OOM, preemption, Ctrl-C) otherwise leaves no
+        checkpoint at all, and crossval chains five of these.
+        """
+        torch.save({"state_dict": state_dict, "stats": stats,
+                    "channels": channels, "win": args.win,
+                    "out_win": args.out_win,
+                    "channel_indices": (None if chan_idx is None
+                                        else chan_idx.tolist()),
+                    "rotate_aug": args.rotate_aug, "width": args.width,
+                    "lowpass_aug": list(args.lowpass_aug),
+                    "epoch": epoch}, ckpt_path)
+
+    out = fit(ds_tr, ds_va, len(channels), cfg, on_epoch=on_epoch,
+              on_best=save, stats=stats)
     f.close()
 
     print(f"device {out['device']}  params {out['model'].n_params}")
-    torch.save({"state_dict": out["model"].state_dict(),
-                "stats": out["stats"], "channels": channels, "win": args.win,
-                "out_win": args.out_win,
-                "channel_indices": None if chan_idx is None else chan_idx.tolist(),
-                "rotate_aug": args.rotate_aug, "width": args.width,
-                "lowpass_aug": list(args.lowpass_aug),
-                "epoch": min(out["history"],
-                             key=lambda h: h["val_loss"])["epoch"]},
-               MODEL_DIR / f"tcn_best{tag}.pt")
-    print(f"\nbest val {out['best_val']:.4f} -> {MODEL_DIR/f'tcn_best{tag}.pt'}")
+    best_ep = min(out["history"], key=lambda h: h["val_loss"])["epoch"]
+    save(out["model"].state_dict(), best_ep)   # idempotent; pins the final file
+    print(f"\nbest val {out['best_val']:.4f} (epoch {best_ep}) -> {ckpt_path}")
     return 0
 
 
