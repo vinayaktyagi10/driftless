@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from .evaluate import load_model
-from .paths import MODEL_DIR
+from .paths import MODEL_DIR, rel_to_repo
 
 # Parity tolerance is expressed as a fraction of each output's own standard
 # deviation, not as a raw absolute number. The outputs are in SI units (speed in
@@ -30,6 +30,13 @@ from .paths import MODEL_DIR
 # the model's own error and far above float32 kernel noise.
 TOL_ONNX_FRAC = 1e-3
 TOL_TFLITE_FRAC = 2e-2
+
+# Per-node ONNX metadata that records where in the *exporting* machine's source
+# tree each node came from. `pkg.torch.onnx.stack_trace` is the one that carries
+# absolute paths; the rest of torch's metadata (namespace, class hierarchy) is
+# path-free and useful when reading the graph, so it stays.
+STRIP_KEYS = ("pkg.torch.onnx.stack_trace",)
+
 
 
 def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0) -> np.ndarray:
@@ -77,6 +84,41 @@ def _parity(y_ref: np.ndarray, y_new: np.ndarray, frac: float) -> dict:
     }
 
 
+def _strip_debug_info(path: Path) -> int:
+    """Remove embedded Python stack traces from an exported ONNX graph.
+
+    torch.onnx.export records, for every node, the source file and line it came
+    from -- including absolute paths inside the exporting machine's virtualenv.
+    That put 283 copies of one contributor's home directory into a tracked
+    artifact that ships to the edge engine. The traces are debug metadata only;
+    ONNX Runtime does not read them. Returns bytes saved.
+
+    Called BEFORE the parity check, so parity is measured on the file we ship.
+    """
+    try:
+        import onnx
+    except ImportError:
+        return 0
+    before = path.stat().st_size
+    m = onnx.load(str(path))
+
+    def scrub(nodes):
+        for node in nodes:
+            node.doc_string = ""
+            keep = [q for q in node.metadata_props if q.key not in STRIP_KEYS]
+            del node.metadata_props[:]
+            node.metadata_props.extend(keep)
+
+    m.doc_string = ""
+    scrub(m.graph.node)
+    for f in m.functions:
+        f.doc_string = ""
+        scrub(f.node)
+    del m.metadata_props[:]
+    onnx.save(m, str(path))
+    return before - path.stat().st_size
+
+
 def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
     dummy = torch.zeros(1, n_ch, win, dtype=torch.float32)
     # external_data=False keeps the weights INSIDE the .onnx. The default split
@@ -92,6 +134,8 @@ def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
         opset_version=18, do_constant_folding=True, external_data=False,
     )
 
+    saved = _strip_debug_info(out)
+
     import onnxruntime as ort
     sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
     X = sample_inputs(n_ch, win)
@@ -99,8 +143,9 @@ def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
         y_torch = model(torch.from_numpy(X)).numpy()
     y_onnx = sess.run(["speed_dpsi"], {"imu_window": X})[0]
 
-    result = {"path": str(out), "size_kb": round(out.stat().st_size / 1024, 1),
+    result = {"path": rel_to_repo(out), "size_kb": round(out.stat().st_size / 1024, 1),
               "n_test_windows": int(len(X)),
+              "debug_info_bytes_stripped": saved,
               **_parity(y_torch, y_onnx, TOL_ONNX_FRAC)}
 
     # Latency, single window -- the number role 01 and role 02 actually care about.
@@ -156,7 +201,7 @@ def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
     latency = (time.perf_counter() - t0) / N * 1000
 
     return {
-        "path": str(out),
+        "path": rel_to_repo(out),
         "size_kb": round(out.stat().st_size / 1024, 1),
         "skipped": False,
         "via": "keras weight port (not onnx2tf)",

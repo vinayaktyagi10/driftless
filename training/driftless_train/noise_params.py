@@ -36,7 +36,7 @@ import torch
 from .dataset import DT, load_index, make_splits, split_runs
 from .evaluate import load_model, longest_valid_span, window_predictions
 from .pair import TRUSTED_COUPLING_CORR
-from .paths import METRIC_DIR, MODEL_DIR
+from .paths import METRIC_DIR, MODEL_DIR, rel_to_repo
 
 SPEED_BANDS = ((0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 25.0), (25.0, 40.0))
 
@@ -196,7 +196,7 @@ def analyse(ckpt, splits: tuple[str, ...] = ("test", "val"),
         "splits": list(splits),
         "by_split": by_split_stats,
         "bias_is_route_dependent": True,
-        "checkpoint": str(ckpt),
+        "checkpoint": rel_to_repo(ckpt),
         "context_s": round(win * DT, 2),
         "update_interval_s": round(win_dt, 2),
         "n_windows": int(len(rs)),

@@ -24,7 +24,7 @@
     }
   ],
   "bias_is_route_dependent": true,
-  "checkpoint": "/Users/rohitkumaryadav/Documents/Projects/driftless/training/artifacts/models/tcn_best.pt",
+  "checkpoint": "training/artifacts/models/tcn_best.pt",
   "context_s": 8.0,
   "update_interval_s": 2.0,
   "n_windows": 7081,

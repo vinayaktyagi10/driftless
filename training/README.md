@@ -462,8 +462,8 @@ memorise a road instead of learning vehicle dynamics.
 
 | | Size | Parity vs PyTorch | Latency | Input |
 |---|---|---|---|---|
-| **ONNX** (C++ edge engine) | 123.4 KB (+150 KB `.onnx.data`) | 2.3e-6 rel | 0.118 ms/window | `[1, 14, 80]` **NCW** |
-| **TFLite** (Android app) | 182.3 KB | 1.5e-6 rel | 0.067 ms/window | `[1, 80, 14]` **NWC** |
+| **ONNX** (C++ edge engine) | 218.3 KB (one self-contained file) | 2.3e-06 rel | 0.108 ms/window | `[1, 14, 80]` **NCW** |
+| **TFLite** (Android app) | 182.3 KB | 1.5e-06 rel | 0.066 ms/window | `[1, 80, 14]` **NWC** |
 
 Note the layouts differ — TFLite is channels-last (time-major), which is the
 natural layout for an Android ring buffer anyway. Parity is asserted numerically

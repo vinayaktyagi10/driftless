@@ -55,3 +55,74 @@ def test_no_unrendered_placeholders(doc):
     # so the literal `{expr}` was written out instead of its value.
     for bad in ("{res[", "{cv[", "{ev[", "{af[", "{p30[", "{sp[", "None m"):
         assert bad not in text, f"{doc.name}: unrendered {bad!r}"
+
+
+def test_readme_export_table_matches_the_export_report():
+    """The README's export table is hand-written; the report is generated.
+
+    A reviewer found the two had drifted (the README still advertised a
+    `.onnx.data` sidecar that no longer exists). Stale published numbers are the
+    defect this repo has hit most often, so pin the table to its source rather
+    than re-checking it by eye.
+    """
+    import json
+    import re
+
+    from driftless_train.paths import MODEL_DIR, TRAIN_ROOT
+
+    report_path = MODEL_DIR / "export_report.json"
+    if not report_path.exists():
+        pytest.skip("no export report committed")
+    rep = json.loads(report_path.read_text())
+    readme = (TRAIN_ROOT / "README.md").read_text()
+
+    for runtime, key in (("ONNX", "onnx"), ("TFLite", "tflite")):
+        sub = rep.get(key, {})
+        if sub.get("skipped"):
+            continue
+        row = next((ln for ln in readme.splitlines()
+                    if ln.startswith(f"| **{runtime}**")), None)
+        assert row, f"no {runtime} row in the README export table"
+
+        size = re.search(r"\|\s*([\d.]+) KB", row)
+        assert size and float(size.group(1)) == sub["size_kb"], (
+            f"{runtime} size in README ({size.group(1) if size else '?'} KB) != "
+            f"export_report.json ({sub['size_kb']} KB) -- regenerate the table")
+
+        lat = re.search(r"([\d.]+) ms/window", row)
+        assert lat and abs(float(lat.group(1))
+                           - sub["latency_ms_per_window"]) < 5e-4, (
+            f"{runtime} latency in README != export_report.json")
+
+        # The README renders parity to two significant figures, so compare the
+        # rendering rather than the raw float.
+        rel = re.search(r"([\d.]+e-[\d]+) rel", row)
+        assert rel and rel.group(1) == f"{sub['max_rel_diff']:.1e}", (
+            f"{runtime} parity in README ({rel.group(1) if rel else '?'}) != "
+            f"export_report.json ({sub['max_rel_diff']:.1e})")
+
+
+def test_no_tracked_artifact_embeds_an_absolute_path():
+    """A committed artifact must not carry the producing machine's directories.
+
+    Found in review: `export_report.json` had one, and the exported `.onnx`
+    carried 283 of them in per-node stack traces. Both are fixed at the
+    generator; this stops them coming back.
+    """
+    import subprocess
+
+    from driftless_train.paths import REPO_ROOT
+
+    tracked = subprocess.run(["git", "ls-files", "-z", "training/artifacts"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+    offenders = []
+    for name in tracked.stdout.split("\0"):
+        if not name:
+            continue
+        blob = (REPO_ROOT / name).read_bytes()
+        for needle in (b"/Users/", b"/home/", b"C:\\Users\\"):
+            if needle in blob:
+                offenders.append(f"{name} contains {needle.decode('latin-1')!r}")
+                break
+    assert not offenders, ("absolute paths in tracked artifacts:\n"
+                           + "\n".join(offenders))
