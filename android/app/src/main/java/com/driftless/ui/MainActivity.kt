@@ -103,6 +103,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // A split log file has two very different causes -- a lifecycle
+        // STOP/START, or a full activity recreation -- and they need different
+        // fixes. `dumpsys usagestats` records the first for days after the
+        // fact, but it is blind to the second: its instanceId tracks the
+        // ActivityRecord, which survives recreation. This line supplies the
+        // half the platform does not, and is the whole difference between
+        // diagnosing a split run live and inferring it wrongly afterwards.
+        Log.i(
+            DIAG_TAG,
+            "onCreate activity=${System.identityHashCode(this)} " +
+                "recreated=${savedInstanceState != null}",
+        )
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
