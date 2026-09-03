@@ -1,8 +1,24 @@
+# Core pipeline: download -> audit -> prepare -> train -> evaluate
+numpy>=2.0
+pandas>=2.2
+matplotlib>=3.8
 torch>=2.4
-numpy
-pandas
-scipy
-onnx
-onnx2tf
+tabulate>=0.9        # pandas .to_markdown() in the dataset audit
+
+# ONNX export for the C++ edge engine.
+onnx>=1.16
+onnxscript>=0.1      # required by torch.onnx's dynamo exporter, not optional
+onnxruntime>=1.18    # used to verify the export matches PyTorch
+
+# TFLite export for the Android app. Heavy; skip with `export --skip-tflite`.
+#
+# NOTE: onnx2tf was in this file originally and has been REMOVED. It mistranslates
+# this architecture's residual connections and, worse, produced a model that
+# converted "successfully" while disagreeing with PyTorch by 5.4e-2. TFLite is now
+# built by porting the trained weights into an equivalent Keras model and using
+# the first-party converter (driftless_train/keras_port.py), which matches to
+# ~1e-6. Nothing here depends on onnx2tf any more.
 tensorflow>=2.16
-matplotlib
+
+# Tests pin the dataset's unit/axis/convention traps; see training/tests/.
+pytest>=8.0

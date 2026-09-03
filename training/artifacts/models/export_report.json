@@ -1,0 +1,81 @@
+{
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_yaw",
+    "gyro_pitch",
+    "gyro_roll",
+    "grav_x",
+    "grav_y",
+    "grav_z",
+    "acc_norm",
+    "acc_vert",
+    "acc_horiz",
+    "gyro_vert",
+    "gyro_horiz"
+  ],
+  "win": 80,
+  "out_win": 20,
+  "n_params": 38499,
+  "input_shape": [
+    1,
+    14,
+    80
+  ],
+  "context_s": 8.0,
+  "output_interval_s": 2.0,
+  "output": [
+    "speed_ms",
+    "dpsi_rad",
+    "dv_ms"
+  ],
+  "notes": "Input normalisation and output de-normalisation are baked into the graph; feed raw SI-unit IMU features and read SI-unit outputs.",
+  "onnx": {
+    "path": "/Users/rohitkumaryadav/Documents/Projects/driftless/training/artifacts/models/tcn_speed_heading.onnx",
+    "size_kb": 123.4,
+    "n_test_windows": 64,
+    "max_abs_diff_per_output": [
+      4.77e-06,
+      6e-07,
+      1.42e-06
+    ],
+    "output_std": [
+      5.532575,
+      0.285022,
+      0.969662
+    ],
+    "max_rel_diff": 2.09e-06,
+    "tolerance_rel": 0.001,
+    "passed": true,
+    "latency_ms_per_window": 0.1147
+  },
+  "tflite": {
+    "path": "/Users/rohitkumaryadav/Documents/Projects/driftless/training/artifacts/models/tcn_speed_heading.tflite",
+    "size_kb": 182.3,
+    "skipped": false,
+    "via": "keras weight port (not onnx2tf)",
+    "input_shape": [
+      1,
+      80,
+      14
+    ],
+    "input_layout": "NWC / channels-last (time-major) -- note this differs from the ONNX model's NCW",
+    "quantisation": "none (float32). int8 dynamic-range costs 2-8% error, float16 is unusable here (>100%); the model is small enough that neither is worth it.",
+    "keras_vs_torch_max_rel": 1.5e-06,
+    "latency_ms_per_window": 0.0683,
+    "max_abs_diff_per_output": [
+      3.81e-06,
+      6e-07,
+      1.43e-06
+    ],
+    "output_std": [
+      5.20528,
+      0.318675,
+      0.83415
+    ],
+    "max_rel_diff": 1.87e-06,
+    "tolerance_rel": 0.02,
+    "passed": true
+  }
+}

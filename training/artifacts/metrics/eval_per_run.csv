@@ -1,0 +1,2 @@
+run_id,route,span_s,n_windows,speed_mae_ms,dpsi_mae_deg,gyro_dpsi_mae_deg
+S-S1#0,S/S1,5174.3,2584,1.5431,1.0568,15.6201
