@@ -19,7 +19,11 @@ else()
     FetchContent_Declare(eigen
         GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
         GIT_TAG 3.4.0
-        GIT_SHALLOW TRUE)
+        GIT_SHALLOW TRUE
+        # Eigen is header-only: populate WITHOUT add_subdirectory, so its own
+        # ~915-test suite is not registered into our ctest run (it otherwise
+        # makes `ctest` exit 8 at the build root even when our own tests pass).
+        SOURCE_SUBDIR do-not-configure)
     FetchContent_MakeAvailable(eigen)
     add_library(driftless_eigen INTERFACE)
     target_include_directories(driftless_eigen SYSTEM INTERFACE ${eigen_SOURCE_DIR})
