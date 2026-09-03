@@ -449,4 +449,39 @@ UkfFusionEngine::UpdateOutcome UkfFusionEngine::updateNonHolonomic() {
     return outcome;
 }
 
+// --- Learned velocity model --------------------------------------------
+
+UkfFusionEngine::UpdateOutcome UkfFusionEngine::updateVelocityModel(
+    double predicted_forward_speed_mps) {
+    const auto& p = config_.velocity_model;
+
+    // Correct the measured systematic bias before this is treated as an
+    // unbiased measurement.
+    const double corrected_speed_mps = predicted_forward_speed_mps - p.bias_mps;
+
+    // Forward component of body-frame velocity -- the axis updateNonHolonomic
+    // deliberately leaves unconstrained. Nonlinear in the attitude error, so
+    // this takes the unscented path.
+    const MeasurementFunction h = [](const NavState& s) -> Eigen::VectorXd {
+        Eigen::VectorXd z(1);
+        z(0) = bodyVelocity(s).x();
+        return z;
+    };
+
+    Eigen::VectorXd z(1);
+    z(0) = corrected_speed_mps;
+
+    Eigen::MatrixXd sqrt_R(1, 1);
+    sqrt_R(0, 0) = p.sigma_mps * p.correlation_inflation;
+
+    const UpdateOutcome outcome =
+        updateUnscented(h, z, sqrt_R, p.gate_confidence);
+    if (outcome == UpdateOutcome::kApplied) {
+        ++diagnostics_.velocity_model_applied;
+    } else if (outcome == UpdateOutcome::kRejectedByGate) {
+        ++diagnostics_.velocity_model_rejected;
+    }
+    return outcome;
+}
+
 }  // namespace driftless

@@ -116,6 +116,31 @@ public:
         double gate_confidence = 0.99;
     };
 
+    struct VelocityModelParams {
+        // Held-out residuals of the learned speed/heading model, pooled across
+        // BOTH held-out routes (training/artifacts/metrics/measurement_noise.md).
+        // A single-route figure (2.2046) was ~30% optimistic.
+        double sigma_mps = 2.893;
+        // Not a sensor offset -- it changes sign between held-out routes
+        // (+0.4853 on one, -0.5536 on the other), so it is a property of each
+        // route's speed distribution interacting with a shrinkage estimator,
+        // not something safe to correct for at inference time. Left at 0.0 and
+        // kept as a field for future per-deployment calibration only.
+        double bias_mps = 0.0;
+
+        // Consecutive predictions share most of their 8s context, so their
+        // errors are NOT independent -- lag-1 autocorrelation 0.7367,
+        // decorrelation time 8s against a 2s update interval. Feeding each one
+        // in as though independent over-informs the filter by about 2x in
+        // sigma. Same trap as NonHolonomicParams::lateral_sigma_mps above (an
+        // over-tight sigma at high rate collapsed the attitude covariance and
+        // cost 21 honest GNSS fixes); the same cheap defence is used here
+        // rather than gating the update rate to the decorrelation time.
+        double correlation_inflation = 2.0;
+
+        double gate_confidence = 0.99;
+    };
+
     struct MapMatchParams {
         // How far the true position may sit from the mapped centreline: half a
         // carriageway plus map digitisation error. This is a property of roads
@@ -136,6 +161,8 @@ public:
         int map_match_applied = 0;
         int map_match_rejected = 0;
         int map_match_skipped = 0;
+        int velocity_model_applied = 0;
+        int velocity_model_rejected = 0;
     };
 
     struct Config {
@@ -158,6 +185,7 @@ public:
         GnssParams gnss;
         NonHolonomicParams non_holonomic;
         MapMatchParams map_match;
+        VelocityModelParams velocity_model;
     };
 
     UkfFusionEngine(const NavState& initial_state,
@@ -193,6 +221,13 @@ public:
     // informative about heading in the first place.
     UpdateOutcome updateGnss(const GnssFix& fix);
     UpdateOutcome updateNonHolonomic();
+
+    // Forward-speed measurement from the learned speed/heading model (training
+    // handover, see VelocityModelParams). Fits the one axis the non-holonomic
+    // constraint deliberately leaves free -- see bodyVelocity -- so it takes
+    // the unscented path for the same reason NHC does: h is nonlinear in the
+    // attitude error, which is exactly why this is informative about heading.
+    UpdateOutcome updateVelocityModel(double predicted_forward_speed_mps);
 
     // Fold a map match back into the estimate.
     //
