@@ -21,7 +21,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.driftless.R
 import com.driftless.databinding.ActivityMainBinding
+import com.driftless.fusion.FusedPosition
 import com.driftless.fusion.GnssFix
+import com.driftless.fusion.StubFusionEngine
 import com.driftless.logging.TrackLogger
 import com.driftless.sensors.GnssSampler
 import com.driftless.sensors.ImuFrame
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: AppSettings
     private lateinit var imuSampler: ImuSampler
     private lateinit var gnssSampler: GnssSampler
+    private lateinit var engine: StubFusionEngine
     private lateinit var track: TrackRenderer
     private lateinit var logger: TrackLogger
 
@@ -68,6 +71,11 @@ class MainActivity : AppCompatActivity() {
     private var diagnosticsExpanded = true
     private var anchorLogged = false
     private var lastFixRealtimeNanos = 0L
+
+    // Step-5 diagnostics: the engine's output, so the readout shows what the
+    // map is actually drawing rather than only what the receiver reported.
+    private var fusedCount = 0L
+    private var latestFused: FusedPosition? = null
 
     /**
      * The four states that actually need different UI. Android collapses
@@ -131,6 +139,12 @@ class MainActivity : AppCompatActivity() {
         settings = AppSettings(this)
         imuSampler = ImuSampler(this)
         gnssSampler = GnssSampler(this)
+
+        // A provider, not a value. GnssSampler does not build the local-tangent
+        // frame until the first fix lands, so passing `gnssSampler.frame` here
+        // would hand the engine a null it could never replace, and the map would
+        // stay empty for the whole run with nothing on screen to say why.
+        engine = StubFusionEngine { gnssSampler.frame }
 
         track = TrackRenderer(binding.mapView)
         logger = TrackLogger(this, lifecycleScope)
@@ -285,6 +299,10 @@ class MainActivity : AppCompatActivity() {
                         imuSampler.frames(settings.sensorDelay).collect { frame ->
                             imuCount++
                             latestFrame = frame
+                            // Drives the engine's coast clock. The stub reads
+                            // only the timestamp; the real engine will
+                            // integrate the same sample.
+                            engine.predict(frame.toImuSample())
                             logger.logImu(frame)
                         }
                     }
@@ -294,18 +312,33 @@ class MainActivity : AppCompatActivity() {
                             latestFix = fix
                             lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
 
+                            engine.updateGnss(fix)
+
+                            // The anchor still comes off the raw stream: it is a
+                            // property of the receiver's first fix, not of
+                            // anything the engine computes.
                             gnssSampler.frame?.let { frame ->
                                 if (!anchorLogged) {
                                     logger.logAnchor(frame)
                                     anchorLogged = true
                                 }
-                                // Raw GNSS for now. Step 5 replaces this with
-                                // the fused position; drawing the unfiltered
-                                // track first means any later change on screen
-                                // is attributable to the filter, not the map.
-                                track.addAidedPoint(frame, fix.position)
                             }
+                            // Raw fixes stay in the log even though the map now
+                            // draws fused output. Without them the log cannot
+                            // answer "was the filter right", which is the only
+                            // question a recorded run exists to answer.
                             logger.logFix(fix)
+                        }
+                    }
+                    launch {
+                        // The map's only source since step 5. It never sees a
+                        // raw fix, so anything visibly wrong on screen is the
+                        // engine's, which is what makes the drive test
+                        // diagnostic rather than merely pretty.
+                        engine.observePosition().collect { fused ->
+                            fusedCount++
+                            latestFused = fused
+                            track.addFusedPoint(fused)
                         }
                     }
                     launch { tickDiagnostics() }
@@ -431,6 +464,39 @@ class MainActivity : AppCompatActivity() {
         gnssSampler.frame?.let {
             appendLine(
                 "  anchor %.6f, %.6f".format(Locale.US, it.originLatDeg, it.originLonDeg)
+            )
+        }
+        appendLine()
+
+        // What the map is drawing, which after step 5 is no longer the same
+        // thing as the newest fix. Confidence is the field to watch on a drive
+        // test: it leaves 1.00 exactly when the engine stops being corrected
+        // and starts coasting, so it says whether the orange track on screen is
+        // a real outage or a rendering artefact.
+        val fused = latestFused
+        appendLine("FUSED n=$fusedCount")
+        if (fused == null) {
+            appendLine("      waiting for engine output…")
+        } else {
+            appendLine(
+                "  %.6f, %.6f".format(Locale.US, fused.lat, fused.lon)
+            )
+            appendLine(
+                "  hdg=%.0f deg  speed=%.1f m/s (%.0f km/h)".format(
+                    Locale.US,
+                    fused.headingDegrees,
+                    fused.speedMetersPerSec,
+                    fused.speedMetersPerSec * 3.6f,
+                )
+            )
+            appendLine(
+                if (fused.confidence >= 1f) {
+                    "  conf=1.00  AIDED"
+                } else {
+                    "  conf=%.2f  COASTING %.1fs".format(
+                        Locale.US, fused.confidence, fixAgeSeconds(),
+                    )
+                }
             )
         }
     }

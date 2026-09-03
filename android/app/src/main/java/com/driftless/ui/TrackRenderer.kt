@@ -1,8 +1,7 @@
 package com.driftless.ui
 
 import android.graphics.Color
-import com.driftless.frames.LocalTangentFrame
-import com.driftless.fusion.Position
+import com.driftless.fusion.FusedPosition
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -14,15 +13,16 @@ import org.osmdroid.views.overlay.Polyline
  * Owns everything drawn on the map: the current-position marker and the two
  * tracks.
  *
- * **Two tracks from the start, not one.** The aided track is what the filter
- * produces with GNSS corrections; the dead-reckoned track is what it produces
- * without them. Their divergence during a simulated outage is the entire visual
- * argument of the demo, so the render path is shaped for it now — retrofitting a
- * second overlay during the final 48 hours means editing the one piece of code
- * that is on screen in front of judges.
+ * **Two tracks from the start, not one.** The aided track is what the engine
+ * produces while GNSS is correcting it; the dead-reckoned track is what it
+ * produces once it is coasting alone. Their divergence during an outage is the
+ * entire visual argument of the demo.
  *
- * Step 3 feeds only [aided], from raw GNSS. Step 5 swaps in the fusion engine
- * and starts feeding [deadReckoned]; nothing here changes when it does.
+ * Since step 5 this consumes [FusedPosition] — the engine's output, already in
+ * lat/lon — and no longer sees NED metres or the local-tangent frame at all.
+ * That keeps exactly one place in the app where NED becomes geodetic, and it is
+ * inside the engine, so the map cannot drift out of agreement with the filter
+ * by converting differently.
  */
 class TrackRenderer(private val map: MapView) {
 
@@ -60,35 +60,63 @@ class TrackRenderer(private val map: MapView) {
         map.controller.setZoom(DEFAULT_ZOOM)
     }
 
-    private var lastAided: Position? = null
+    private var lastDrawn: GeoPoint? = null
+    private var lastCoasting: Boolean? = null
 
     /**
-     * Appends to the GNSS-aided track and moves the marker.
+     * Moves the marker to the fused position and extends whichever track the
+     * engine is currently feeding.
+     *
+     * Which track is chosen by [FusedPosition.confidence], which is the field
+     * the contract set aside for exactly this. It holds at 1.0 while the
+     * position is no worse than the fix it came from and decays once the engine
+     * is coasting beyond that, so during normal 1 Hz driving everything lands on
+     * [aided] and the orange line appears only during a real outage.
      *
      * Points closer than [MIN_SEGMENT_M] to the previous one are dropped from
-     * the polyline. A parked vehicle still produces a fix every second, and each
-     * one lands a metre or two away from the last, so without this the track
-     * accumulates a dense scribble wherever the vehicle stopped — which is
+     * the polyline, because a parked vehicle still produces a position ten times
+     * a second and each lands a metre or two from the last — without this the
+     * track accumulates a dense scribble wherever the vehicle stopped, which is
      * exactly where a judge looks to see whether the filter is drifting. The
-     * marker still follows every fix; only the drawn line is thinned.
+     * marker still follows every update; only the drawn line is thinned.
      */
-    fun addAidedPoint(frame: LocalTangentFrame, position: Position) {
-        val point = frame.toGeoPoint(position)
-        val previous = lastAided
-        if (previous == null || previous.distanceTo(position) >= MIN_SEGMENT_M) {
-            aided.addPoint(point)
-            lastAided = position
-        }
-        marker.position = point
-        if (followEnabled) {
-            map.controller.animateTo(point)
-        }
-        map.invalidate()
-    }
+    fun addFusedPoint(fused: FusedPosition) {
+        val point = GeoPoint(fused.lat, fused.lon)
+        val coasting = fused.confidence < 1f
+        val line = if (coasting) deadReckoned else aided
 
-    /** Appends to the dead-reckoning-only track. Unused until step 5. */
-    fun addDeadReckonedPoint(frame: LocalTangentFrame, position: Position) {
-        deadReckoned.addPoint(frame.toGeoPoint(position))
+        val handover = lastCoasting != null && lastCoasting != coasting
+        if (handover) {
+            // Bridge the two polylines at the changeover, or the orange track
+            // appears to begin somewhere the blue one never reached and the
+            // divergence on screen reads as a jump rather than a departure.
+            lastDrawn?.let { line.addPoint(it) }
+        }
+
+        val previous = lastDrawn
+        if (handover || previous == null ||
+            previous.distanceToAsDouble(point) >= MIN_SEGMENT_M
+        ) {
+            line.addPoint(point)
+            lastDrawn = point
+        }
+        lastCoasting = coasting
+
+        marker.position = point
+        marker.rotation = -fused.headingDegrees
+        // Dimmed while coasting, never invisible: the marker fading is the
+        // cheapest honest signal that the position is no longer measured.
+        marker.alpha = MARKER_ALPHA_FLOOR +
+            (1f - MARKER_ALPHA_FLOOR) * fused.confidence.coerceIn(0f, 1f)
+
+        if (followEnabled) {
+            // setCenter, not animateTo. The engine republishes at 10 Hz and
+            // animateTo spans ~300 ms, so animating would stack three
+            // overlapping animations per position and the marker would lag the
+            // track it is drawing. At 10 Hz the discrete steps *are* the smooth
+            // motion.
+            map.controller.setCenter(point)
+        }
         map.invalidate()
     }
 
@@ -98,27 +126,11 @@ class TrackRenderer(private val map: MapView) {
     }
 
     fun clear() {
-        lastAided = null
+        lastDrawn = null
+        lastCoasting = null
         aided.setPoints(emptyList())
         deadReckoned.setPoints(emptyList())
         map.invalidate()
-    }
-
-    /**
-     * The single place NED metres become map coordinates. Routed through
-     * [LocalTangentFrame.toGeodetic] rather than given its own conversion, so
-     * the map consumes exactly what the fusion engine emits and inherits the
-     * round trip the frame tests already pin.
-     */
-    private fun LocalTangentFrame.toGeoPoint(position: Position): GeoPoint {
-        val g = toGeodetic(position)
-        return GeoPoint(g.latDeg, g.lonDeg)
-    }
-
-    private fun Position.distanceTo(other: Position): Double {
-        val dn = north - other.north
-        val de = east - other.east
-        return kotlin.math.sqrt(dn * dn + de * de)
     }
 
     private companion object {
@@ -126,9 +138,12 @@ class TrackRenderer(private val map: MapView) {
 
         /**
          * Metres of horizontal movement before a new vertex is drawn. Below the
-         * ~2.6 m sigma_h observed on this handset, so real motion is never
+         * ~2.75 m sigma_h observed on this handset, so real motion is never
          * thinned, but above the jitter of a stationary receiver.
          */
         const val MIN_SEGMENT_M = 2.0
+
+        /** How faint a fully-unconfident marker gets. */
+        const val MARKER_ALPHA_FLOOR = 0.35f
     }
 }
