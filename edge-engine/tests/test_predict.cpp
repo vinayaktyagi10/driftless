@@ -207,6 +207,129 @@ TEST(Predict, AccelBiasIntegratesIntoPositionQuadratically) {
     EXPECT_NEAR(engine.state().position.x(), expected, 1e-3 * expected);
 }
 
+// --- Seeding a learned bias prior at initialization -------------------------
+//
+// There is no dedicated API for this: NavState::accel_bias / gyro_bias are
+// exactly what a caller sets before construction. These two tests exist to
+// PIN THAT DOWN rather than to add anything -- the two prior tests just
+// showed an unobserved bias costs bias*T of heading error and 0.5*bias*T^2 of
+// position error with no update to correct either during a blackout; a
+// caller who has even an approximate prior for that bias (e.g. a learned
+// cold-start estimate, per DECISIONS.md) can hand it to the same constructor
+// used everywhere else and cut most of that cost before predict() ever runs.
+//
+// These tests all seed the mean only, with negligibleSqrtCovariance() --
+// correct here because they are predict-only, so covariance never feeds back
+// into the mean. A real caller must NOT do this: seeding a point estimate
+// with near-zero covariance asserts near-certainty in it, and once GNSS
+// returns the filter will trust that seeded bias over the fix instead of
+// blending it in. The contract for a real deployment is to seed the mean AND
+// widen the corresponding accel/gyro-bias covariance block to the prior's
+// actual uncertainty (its held-out residual sigma, not zero).
+
+TEST(Predict, SeedingAnApproximateGyroBiasPriorCutsUnaidedHeadingDrift) {
+    constexpr double kTrueBias = 2e-4;  // rad/s about body-down
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.gyro_bias = Vec3(0.0, 0.0, kTrueBias);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);  // NavState{} defaults to zero bias
+
+    NavState warm_start;
+    warm_start.gyro_bias = Vec3(0.0, 0.0, 0.9 * kTrueBias);  // an imperfect prior
+    const auto warm = runStream(samples, warm_start);
+
+    // True heading is 0 throughout (ConstantTurnTrajectory(0, 0) is straight
+    // and stationary), so the state's own heading IS the error.
+    const double cold_error = std::abs(headingOf(cold.state()));
+    const double warm_error = std::abs(headingOf(warm.state()));
+    std::cout << "[ INFO     ] heading error, cold start vs seeded prior: "
+              << cold_error << " -> " << warm_error << " rad\n";
+    // The residual error is linear in the residual bias (10% of true), so the
+    // ratio must land at 0.1, not just "under some loose threshold" -- a prior
+    // applied with the wrong scale would still pass EXPECT_LT(0.2) but fail
+    // this.
+    EXPECT_NEAR(warm_error / cold_error, 0.1, 0.03);
+}
+
+TEST(Predict, SeedingAWrongSignGyroBiasPriorMakesUnaidedHeadingDriftWorse) {
+    // The mechanism that helps a good prior also hurts a bad one -- rejecting
+    // the online corrector was itself an act of distrust in a learned bias
+    // estimate, so this prior deserves the same scepticism. With no update to
+    // walk it back, a wrong-sign prior at the same magnitude as the true bias
+    // doubles the residual (true - seeded = true - (-true) = 2*true) rather
+    // than cancelling it.
+    constexpr double kTrueBias = 2e-4;  // rad/s about body-down
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.gyro_bias = Vec3(0.0, 0.0, kTrueBias);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);
+
+    NavState bad_start;
+    bad_start.gyro_bias = Vec3(0.0, 0.0, -kTrueBias);  // wrong sign
+    const auto bad = runStream(samples, bad_start);
+
+    const double cold_error = std::abs(headingOf(cold.state()));
+    const double bad_error = std::abs(headingOf(bad.state()));
+    std::cout << "[ INFO     ] heading error, cold start vs wrong-sign prior: "
+              << cold_error << " -> " << bad_error << " rad\n";
+    EXPECT_NEAR(bad_error / cold_error, 2.0, 0.05);
+}
+
+TEST(Predict, SeedingAnApproximateAccelBiasPriorCutsUnaidedPositionDrift) {
+    constexpr double kTrueBias = 0.01;  // m/s^2 forward
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.accel_bias = Vec3(kTrueBias, 0.0, 0.0);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);
+
+    NavState warm_start;
+    warm_start.accel_bias = Vec3(0.9 * kTrueBias, 0.0, 0.0);
+    const auto warm = runStream(samples, warm_start);
+
+    // True position is 0 throughout (same stationary trajectory as above), so
+    // the state's own position IS the error.
+    const double cold_error = std::abs(cold.state().position.x());
+    const double warm_error = std::abs(warm.state().position.x());
+    std::cout << "[ INFO     ] position error, cold start vs seeded prior: "
+              << cold_error << " -> " << warm_error << " m\n";
+    EXPECT_NEAR(warm_error / cold_error, 0.1, 0.03);
+}
+
+TEST(Predict, SeedingAWrongSignAccelBiasPriorMakesUnaidedPositionDriftWorse) {
+    // Same downside-bounding as the gyro case above, on the position channel.
+    constexpr double kTrueBias = 0.01;  // m/s^2 forward
+    constexpr double kDuration = 60.0;
+
+    ImuStreamOptions options;
+    options.duration_s = kDuration;
+    options.accel_bias = Vec3(kTrueBias, 0.0, 0.0);
+    const auto samples = generateImuStream(ConstantTurnTrajectory(0.0, 0.0), options);
+
+    const auto cold = runStream(samples);
+
+    NavState bad_start;
+    bad_start.accel_bias = Vec3(-kTrueBias, 0.0, 0.0);  // wrong sign
+    const auto bad = runStream(samples, bad_start);
+
+    const double cold_error = std::abs(cold.state().position.x());
+    const double bad_error = std::abs(bad.state().position.x());
+    std::cout << "[ INFO     ] position error, cold start vs wrong-sign prior: "
+              << cold_error << " -> " << bad_error << " m\n";
+    EXPECT_NEAR(bad_error / cold_error, 2.0, 0.05);
+}
+
 TEST(Predict, SecondOrderMeanCorrectionScalesWithAttitudeVariance) {
     // With a REALISTIC covariance the propagated mean is deliberately not the
     // integration of the mean. E[R(dtheta) * f] != R * f when attitude is
