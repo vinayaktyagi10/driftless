@@ -31,6 +31,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.osmdroid.events.DelayedMapListener
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import java.util.Locale
 
 /**
@@ -47,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: AppSettings
     private lateinit var imuSampler: ImuSampler
     private lateinit var gnssSampler: GnssSampler
+    private lateinit var track: TrackRenderer
     private lateinit var logger: TrackLogger
 
     private var samplingJob: Job? = null
@@ -60,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     private var latestFrame: ImuFrame? = null
     private var gnssCount = 0L
     private var latestFix: GnssFix? = null
+    private var diagnosticsExpanded = true
     private var anchorLogged = false
     private var lastFixRealtimeNanos = 0L
 
@@ -103,29 +109,66 @@ class MainActivity : AppCompatActivity() {
         // Sampling is scoped to repeatOnLifecycle(STARTED), which is correct --
         // a 500 Hz IMU must not keep running behind a locked screen. The
         // consequence is that a screen timeout silently ends a road test
-        // partway through, leaving a track that simply stops. A window flag
-        // rather than a wake lock: it needs no permission and cannot outlive
-        // the activity, so there is nothing to leak if the app is killed.
+        // partway through, with a track that just stops. A window flag rather
+        // than a wake lock: it needs no permission and cannot outlive the
+        // activity, so there is nothing to leak if the app is killed.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         settings = AppSettings(this)
         imuSampler = ImuSampler(this)
         gnssSampler = GnssSampler(this)
+
+        track = TrackRenderer(binding.mapView)
         logger = TrackLogger(this, lifecycleScope)
 
+        // Any manual pan or zoom hands control to the user and stops the map
+        // chasing the marker. Wrapped in DelayedMapListener because a single
+        // fling fires scroll events continuously, and reacting to each one
+        // would repaint the overlays dozens of times per gesture.
+        binding.mapView.addMapListener(
+            DelayedMapListener(
+                object : MapListener {
+                    override fun onScroll(event: ScrollEvent?): Boolean {
+                        track.followEnabled = false
+                        return false
+                    }
+
+                    override fun onZoom(event: ZoomEvent?): Boolean = false
+                },
+                MAP_GESTURE_DEBOUNCE_MS,
+            )
+        )
+
+        // The readout is a development instrument, not part of the demo. It
+        // covers roughly a third of the map, which is the part judges are
+        // actually looking at, so it collapses on tap rather than being either
+        // permanently in the way or unavailable when something looks wrong.
+        binding.diagnosticsText.setOnClickListener { diagnosticsExpanded = false; renderDiagnostics() }
+        binding.diagnosticsBadge.setOnClickListener { diagnosticsExpanded = true; renderDiagnostics() }
+
+        binding.recentreButton.setOnClickListener { track.recentre() }
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-        // TODO(step 3-5): feed these into the fusion engine and render the
-        // result on the osmdroid MapView.
+        // TODO(step 5): draw the fused position instead of the raw fix, and
+        // start feeding the dead-reckoning-only track alongside it.
     }
 
     override fun onResume() {
         super.onResume()
+        // MapView runs its own tile-fetch threads and does not observe the
+        // activity lifecycle on its own. Without this pair they outlive the
+        // activity, which over a half-hour drive test is a real leak.
+        binding.mapView.onResume()
         // Re-checked on every resume rather than only in onCreate, because the
         // user can revoke or grant the permission in system settings while the
         // activity is merely stopped, and Android does not restart us for it.
         render()
+    }
+
+    override fun onPause() {
+        binding.mapView.onPause()
+        super.onPause()
     }
 
     private fun locationAccess(): LocationAccess {
@@ -242,6 +285,11 @@ class MainActivity : AppCompatActivity() {
                                     logger.logAnchor(frame)
                                     anchorLogged = true
                                 }
+                                // Raw GNSS for now. Step 5 replaces this with
+                                // the fused position; drawing the unfiltered
+                                // track first means any later change on screen
+                                // is attributable to the filter, not the map.
+                                track.addAidedPoint(frame, fix.position)
                             }
                             logger.logFix(fix)
                         }
@@ -278,6 +326,7 @@ class MainActivity : AppCompatActivity() {
 
             val text = diagnosticsText()
             binding.diagnosticsText.text = text
+            renderDiagnostics()
             // Mirrored to logcat so the readout can be verified over adb without
             // depending on a screenshot — the phone blanks its display for
             // reasons that have nothing to do with this app.
@@ -285,14 +334,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Seconds since the last fix, or -1 before the first one arrives.
-     *
-     * Shown because sigma alone is misleading during exactly the event a road
-     * test exists to find: a receiver that stops reporting keeps its last
-     * sigma_h on screen and goes on looking healthy. Age is the only field here
-     * that moves when GNSS dies.
-     */
+    /** Shows either the full readout or a one-line badge, never both. */
+    private fun renderDiagnostics() {
+        binding.diagnosticsText.visibility =
+            if (diagnosticsExpanded) android.view.View.VISIBLE else android.view.View.GONE
+        binding.diagnosticsBadge.visibility =
+            if (diagnosticsExpanded) android.view.View.GONE else android.view.View.VISIBLE
+        // Fix age, not just sigma. A receiver that has stopped reporting keeps
+        // its last sigma_h on screen forever and looks healthy, which is exactly
+        // the failure the drive test is meant to find. Age is the only field
+        // here that moves when GNSS dies.
+        binding.diagnosticsBadge.text = getString(
+            R.string.diagnostics_badge_fmt,
+            measuredHz.toInt(),
+            gnssSampler.satellitesUsed,
+            latestFix?.horizontalAccuracyM ?: Double.NaN,
+            fixAgeSeconds(),
+        )
+    }
+
+    /** Seconds since the last fix, or -1 before the first one arrives. */
     private fun fixAgeSeconds(): Double =
         if (lastFixRealtimeNanos == 0L) -1.0
         else (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9
@@ -362,6 +423,9 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val DIAG_TAG = "DriftlessDiag"
+
+        /** Coalesces the scroll events a single fling produces. */
+        const val MAP_GESTURE_DEBOUNCE_MS = 200L
     }
 
     private fun vec(v: FloatArray) =

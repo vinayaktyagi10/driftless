@@ -24,6 +24,8 @@
     <string name="action_grant">Grant permission</string>
     <string name="action_open_settings">Open app settings</string>
     <string name="action_settings">Settings</string>
+    <string name="action_recentre">Re-centre</string>
+    <string name="diagnostics_badge_fmt">%1$d Hz · %2$d sats · %3$.1f m · %4$.0fs</string>
 
     <string name="sensor_availability_fmt">Accelerometer %1$s · Gyroscope %2$s ·
         Magnetometer %3$s · Gravity %4$s</string>
