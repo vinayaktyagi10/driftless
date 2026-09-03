@@ -434,13 +434,44 @@ Two consequences, and the second is the important one:
    mount fixed, so it is blind to this dependence by construction. The reported
    numbers do not cover a different car, tyres, mount or phone.
 
-The plausible fix is the same shape as the one that fixed mount sensitivity:
-train with low-pass augmentation so the model cannot lean on any single
-frequency band, accepting some absolute accuracy for robustness. That is a
-training run and a deliberate trade, not done yet.
+### Training the shortcut away — and what that measures
 
-`python -m driftless_train.sensor_tier`; detail in
-`artifacts/metrics/sensor_tier.md`.
+The fix is the same shape as the one that fixed mount sensitivity: train on
+low-passed copies of every run (`--lowpass-aug 4 2 1`) so the model cannot lean
+on any single frequency band. Measured on the same held-out runs, same routes,
+so route difficulty cancels — 30 s blackout error relative to each model's own
+native result:
+
+| 30 s blackout, relative to native | native | 4 Hz | 2 Hz | 1 Hz | 0.5 Hz |
+|---|---|---|---|---|---|
+| shipped (`tcn_best.pt`) | 32.67 m | 1.02× | 2.11× | 3.50× | 4.32× |
+| `--lowpass-aug 4 2 1` | 35.23 m | **0.99×** | **0.99×** | **1.01×** | **1.48×** |
+
+**The dependence is gone.** And 0.5 Hz was never trained on — the cutoffs were
+4/2/1 — so the model learned not to rely on high-frequency content in general
+rather than memorising the three tiers it saw. Heading improves slightly under
+low-pass (0.88× at 2 Hz).
+
+The price is **8% on the native phone tier** (32.67 → 35.23 m). That figure is
+the useful part: it is the size of the vibration shortcut, i.e. how much of the
+shipped model's accuracy comes from a cue specific to this vehicle, mount and
+road surface. Read the other way, **the headline numbers above are ~8%
+optimistic for any vehicle that is not the IO-VNBD one.**
+
+**The shipped checkpoint is still `tcn_best.pt`**, because the phone path *is*
+the native tier and it is better there (30 s on test: 31.39 m vs 33.26 m). The
+augmented recipe is the one to fine-tune from for a different vehicle, handset
+or a cleaner IMU — which makes the edge tier's data collection plausibly a
+fine-tune rather than a from-scratch dataset. Checkpoints are gitignored, so
+that is a retrain, not a file to copy.
+
+Caveat unchanged: there is still no FOG data to validate the simulation
+against, so this bounds the architecture's response to losing high-frequency
+content. It does not certify FOG performance.
+
+`python -m driftless_train.sensor_tier`, and
+`--ckpt <augmented> --tag lpaug` for the second row; detail in
+`artifacts/metrics/sensor_tier.md` and `sensor_tier_lpaug.md`.
 
 ## Evaluation: the question a judge will ask
 
