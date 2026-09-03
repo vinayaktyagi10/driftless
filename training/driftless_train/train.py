@@ -1,6 +1,6 @@
 """Train the speed & heading-change regressor.
 
-Run:  python -m driftless.train --epochs 30
+Run:  python -m driftless_train.train --epochs 30
 Out:  artifacts/models/tcn_best.pt, artifacts/models/stats.json,
       artifacts/metrics/train_log.csv
 """
@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +19,18 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from .dataset import (OUT_WIN, PROC_DIR, STRIDE_TRAIN, WIN, WindowDataset,
-                      compute_stats, load_index, make_splits, split_runs)
+from .dataset import (
+    OUT_WIN,
+    PROC_DIR,
+    STRIDE_TRAIN,
+    WIN,
+    WindowDataset,
+    compute_stats,
+    load_index,
+    make_splits,
+    split_runs,
+)
 from .model import SpeedHeadingTCN
-
 from .paths import METRIC_DIR, MODEL_DIR
 
 
@@ -67,6 +76,83 @@ def run_epoch(model, loader, device, y_std, opt=None, sched=None):
     return tot / max(n, 1), abs_err / max(n, 1)
 
 
+@dataclass
+class FitConfig:
+    """Everything that defines a training run.
+
+    Exists so cross-validation trains *identically* to the canonical path -- a
+    duplicated loop would let the two drift, and then the CV estimate would not
+    be an estimate of the shipped model.
+    """
+
+    epochs: int = 40
+    batch_size: int = 256
+    lr: float = 3e-3
+    weight_decay: float = 1e-4
+    width: int = 48
+    device: str = "auto"
+
+
+def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
+        on_epoch=None, on_best=None, stats: dict | None = None) -> dict:
+    """Train one model. Returns {model, stats, best_val, history}.
+
+    `on_epoch(entry)` is called after every epoch with that epoch's history
+    record, so callers can log however they like without this function knowing
+    anything about files. `on_best(state_dict, epoch)` is called whenever
+    validation improves, so a caller can persist the best weights as they appear
+    rather than only after the last epoch.
+
+    `stats` may be supplied by a caller that has already computed it. Do not let
+    it be recomputed: under `--rotate-aug`/`--lowpass-aug` the dataset is
+    stochastic and draws from a shared RNG, so a second `compute_stats` call
+    returns DIFFERENT numbers (measured: x_mean up to 0.065, x_std 0.56%). The
+    stats written to disk would then disagree with the ones baked into the
+    exported graph.
+    """
+    if stats is None:
+        stats = compute_stats(ds_tr)
+    device = pick_device(cfg.device)
+    model = SpeedHeadingTCN(n_channels, width=cfg.width,
+                            n_out=len(stats["y_mean"])).to(device)
+    model.set_stats(stats)
+
+    y_std = torch.tensor(stats["y_std"], dtype=torch.float32, device=device)
+    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,
+                       num_workers=0, drop_last=True)
+    dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False,
+                       num_workers=0)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                            weight_decay=cfg.weight_decay)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=cfg.lr, total_steps=cfg.epochs * max(len(dl_tr), 1),
+        pct_start=0.25)
+
+    best, best_state, history = float("inf"), None, []
+    for ep in range(1, cfg.epochs + 1):
+        t0 = time.time()
+        tr_loss, _ = run_epoch(model, dl_tr, device, y_std, opt, sched)
+        va_loss, va_mae = run_epoch(model, dl_va, device, y_std)
+        history.append({"epoch": ep, "train_loss": tr_loss, "val_loss": va_loss,
+                        "val_mae": va_mae.tolist(),
+                        "lr": opt.param_groups[0]["lr"],
+                        "secs": round(time.time() - t0, 1)})
+        if va_loss < best:
+            best = va_loss
+            best_state = {k: v.detach().clone() for k, v in
+                          model.state_dict().items()}
+            if on_best is not None:
+                on_best(best_state, ep)
+        if on_epoch is not None:
+            on_epoch(history[-1])
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return {"model": model, "stats": stats, "best_val": best,
+            "history": history, "device": device}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=30)
@@ -84,6 +170,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="drop TRAIN runs whose phone/vehicle coupling is below "
                          "this; val/test are already restricted to trusted runs")
     ap.add_argument("--tag", default="", help="suffix for checkpoint filenames")
+    ap.add_argument("--rotate-aug", action="store_true",
+                    help="augment training windows with random mount rotations")
+    ap.add_argument("--max-tilt-deg", type=float, default=60.0)
+    ap.add_argument("--lowpass-aug", type=float, nargs="*", default=[],
+                    metavar="HZ",
+                    help="sensor-tier augmentation: also train on copies of "
+                         "each run low-passed at these cutoffs (Hz), so the "
+                         "model cannot rely on high-frequency vibration alone. "
+                         "Suggested: --lowpass-aug 4 2 1")
+    ap.add_argument("--invariant-only", action="store_true",
+                    help="train on the 5 gravity-projected, mount-invariant "
+                         "channels only")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny run for plumbing checks; ignores the split policy")
     args = ap.parse_args(argv)
@@ -100,23 +198,31 @@ def main(argv: list[str] | None = None) -> int:
         splits = make_splits(runs)
         parts = split_runs(runs, splits, min_coupling=args.min_coupling)
         for k, v in parts.items():
-            hrs = sum(1 for _ in v)
             print(f"  {k:5} {len(v):3d} runs")
         if not parts["train"] or not parts["val"]:
             print("\nnot enough routes for a real split yet -- use --smoke, or "
                   "prepare more routes first")
             return 1
 
+    from .augment import invariant_channel_indices
+    chan_idx = invariant_channel_indices() if args.invariant_only else None
+    if chan_idx is not None:
+        channels = [channels[i] for i in chan_idx]
+        print(f"mount-invariant subset: {channels}")
+
     ds_tr = WindowDataset(parts["train"], win=args.win, stride=args.stride,
-                          out_win=args.out_win)
+                          out_win=args.out_win, rotate_aug=args.rotate_aug,
+                          max_tilt_deg=args.max_tilt_deg, channels=chan_idx,
+                          lowpass_aug=tuple(args.lowpass_aug))
+    # Validation is never augmented: we want a stable yardstick across epochs.
     ds_va = WindowDataset(parts["val"], win=args.win, stride=args.out_win,
-                          out_win=args.out_win)
+                          out_win=args.out_win, channels=chan_idx)
     print(f"windows: train {len(ds_tr)}  val {len(ds_va)}")
     if not len(ds_tr) or not len(ds_va):
         print("empty window set")
         return 1
 
-    stats = compute_stats(ds_tr)
+    stats = compute_stats(ds_tr)   # same computation fit() performs internally
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     METRIC_DIR.mkdir(parents=True, exist_ok=True)
     (MODEL_DIR / f"stats{tag}.json").write_text(json.dumps(
@@ -127,59 +233,63 @@ def main(argv: list[str] | None = None) -> int:
     print("targets", TARGETS, "\n  mean", np.round(stats["y_mean"], 4).tolist(),
           "\n  std ", np.round(stats["y_std"], 4).tolist())
 
-    device = pick_device(args.device)
-    model = SpeedHeadingTCN(len(channels), width=args.width,
-                            n_out=len(stats["y_mean"])).to(device)
-    model.set_stats(stats)
-    print(f"device {device}  params {model.n_params}")
-
-    y_std = torch.tensor(stats["y_std"], dtype=torch.float32, device=device)
-    dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True,
-                       num_workers=0, drop_last=True)
-    dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False,
-                       num_workers=0)
-
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                            weight_decay=args.weight_decay)
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=args.lr, total_steps=args.epochs * max(len(dl_tr), 1),
-        pct_start=0.25)
+    cfg = FitConfig(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+                    weight_decay=args.weight_decay, width=args.width,
+                    device=args.device)
 
     log_path = METRIC_DIR / f"train_log{tag}.csv"
-    with log_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["epoch", "train_loss", "val_loss", "val_speed_mae_ms",
-                    "val_dpsi_mae_rad", "val_dpsi_mae_deg", "lr", "secs"])
+    f = log_path.open("w", newline="")
+    w = csv.writer(f)
+    w.writerow(["epoch", "train_loss", "val_loss", "val_speed_mae_ms",
+                "val_dpsi_mae_rad", "val_dpsi_mae_deg", "val_dv_mae_ms",
+                "lr", "secs"])
+    state = {"best": float("inf")}
 
-        best = float("inf")
-        for ep in range(1, args.epochs + 1):
-            t0 = time.time()
-            tr_loss, _ = run_epoch(model, dl_tr, device, y_std, opt, sched)
-            va_loss, va_mae = run_epoch(model, dl_va, device, y_std)
-            dt = time.time() - t0
-            lr_now = opt.param_groups[0]["lr"]
-            w.writerow([ep, f"{tr_loss:.6f}", f"{va_loss:.6f}",
-                        f"{va_mae[0]:.4f}", f"{va_mae[1]:.6f}",
-                        f"{np.rad2deg(va_mae[1]):.4f}",
-                        f"{va_mae[2]:.4f}" if len(va_mae) > 2 else "",
-                        f"{lr_now:.2e}", f"{dt:.1f}"])
-            f.flush()
-            flag = ""
-            if va_loss < best:
-                best = va_loss
-                torch.save({"state_dict": model.state_dict(), "stats": stats,
-                            "channels": channels, "win": args.win,
-                            "out_win": args.out_win,
-                            "width": args.width, "epoch": ep},
-                           MODEL_DIR / f"tcn_best{tag}.pt")
-                flag = " *"
-            print(f"ep {ep:3d}/{args.epochs}  train {tr_loss:.4f}  val {va_loss:.4f}"
-                  f"  speed MAE {va_mae[0]:.3f} m/s"
-                  f"  dpsi MAE {np.rad2deg(va_mae[1]):.3f} deg"
-                  f"  dv MAE {va_mae[2]:.3f} m/s  ({dt:.0f}s){flag}",
-                  flush=True)
+    def on_epoch(e):
+        ep, va_mae = e["epoch"], e["val_mae"]
+        w.writerow([ep, f"{e['train_loss']:.6f}", f"{e['val_loss']:.6f}",
+                    f"{va_mae[0]:.4f}", f"{va_mae[1]:.6f}",
+                    f"{np.rad2deg(va_mae[1]):.4f}",
+                    f"{va_mae[2]:.4f}" if len(va_mae) > 2 else "",
+                    f"{e['lr']:.2e}", f"{e['secs']:.1f}"])
+        f.flush()
+        flag = ""
+        if e["val_loss"] < state["best"]:
+            state["best"] = e["val_loss"]
+            flag = " *"
+        print(f"ep {ep:3d}/{args.epochs}  train {e['train_loss']:.4f}  "
+              f"val {e['val_loss']:.4f}"
+              f"  speed MAE {va_mae[0]:.3f} m/s"
+              f"  dpsi MAE {np.rad2deg(va_mae[1]):.3f} deg"
+              f"  dv MAE {va_mae[2]:.3f} m/s  ({e['secs']:.0f}s){flag}",
+              flush=True)
 
-    print(f"\nbest val {best:.4f} -> {MODEL_DIR/f'tcn_best{tag}.pt'}")
+    ckpt_path = MODEL_DIR / f"tcn_best{tag}.pt"
+
+    def save(state_dict, epoch):
+        """Persist the best weights as soon as they appear.
+
+        Written on every improving epoch, not once at the end: a 40-epoch run
+        that is interrupted (OOM, preemption, Ctrl-C) otherwise leaves no
+        checkpoint at all, and crossval chains five of these.
+        """
+        torch.save({"state_dict": state_dict, "stats": stats,
+                    "channels": channels, "win": args.win,
+                    "out_win": args.out_win,
+                    "channel_indices": (None if chan_idx is None
+                                        else chan_idx.tolist()),
+                    "rotate_aug": args.rotate_aug, "width": args.width,
+                    "lowpass_aug": list(args.lowpass_aug),
+                    "epoch": epoch}, ckpt_path)
+
+    out = fit(ds_tr, ds_va, len(channels), cfg, on_epoch=on_epoch,
+              on_best=save, stats=stats)
+    f.close()
+
+    print(f"device {out['device']}  params {out['model'].n_params}")
+    best_ep = min(out["history"], key=lambda h: h["val_loss"])["epoch"]
+    save(out["model"].state_dict(), best_ep)   # idempotent; pins the final file
+    print(f"\nbest val {out['best_val']:.4f} (epoch {best_ep}) -> {ckpt_path}")
     return 0
 
 

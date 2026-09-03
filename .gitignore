@@ -6,6 +6,7 @@
 *.ckpt
 *.pt
 *.onnx
+*.onnx.data
 *.tflite
 
 # ...but DO track the exported models role 01 and roles 04-05 consume, so nobody
@@ -13,8 +14,12 @@
 # and each is verified against PyTorch to ~1e-6 before it is written (see
 # training/artifacts/models/export_report.json).
 !/training/artifacts/models/*.onnx
-!/training/artifacts/models/*.onnx.data
 !/training/artifacts/models/*.tflite
+
+# Deliberately NOT un-ignored: *.onnx.data. The ONNX export now keeps its
+# weights inline (export.py, external_data=False), so a sidecar appearing here
+# means a stale file from an older export -- which would be loaded in
+# preference to nothing and silently shadow the current weights.
 
 # env
 .env
@@ -38,3 +43,7 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Transient: written after each cross-validation fold so an interrupted run
+# keeps its completed folds; deleted when crossval.json is written.
+/training/artifacts/metrics/crossval_partial.json

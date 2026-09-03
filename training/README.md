@@ -26,6 +26,10 @@ python -m driftless_train.train --epochs 40
 python -m driftless_train.evaluate --split val --sweep-alpha   # tune the blend
 python -m driftless_train.evaluate --split test                # report numbers
 python -m driftless_train.export      # ONNX + TFLite, with parity checks
+python -m driftless_train.crossval --k 5   # route-wise CV: the honest headline
+python -m driftless_train.sensor_tier      # does the model transfer to a cleaner IMU?
+python -m driftless_train.noise_params     # measurement noise for role 02's UKF
+python -m driftless_train.allan            # IMU noise characterisation
 python -m driftless_train.report      # assemble ROUND1_EVIDENCE.md
 pytest tests/ -q                      # pins every dataset trap below
 ```
@@ -111,13 +115,21 @@ Each drive has two sides, and in the *Synchronised* set they share a clock:
 ### The dataset's biggest limitation for our purpose
 
 With the gyro axis corrected, phone/vehicle coupling — how well the phone's own
-gyro tracks the car's measured yaw rate — splits cleanly **by driver, not by
-route**:
+gyro tracks the car's measured yaw rate — tracks **the driver, not the route**:
 
-| driver | families | routes | coupling | phone accel noise (\|acc\| std) |
-|---|---|---|---|---|
-| A, B, D | S, M, Y | 8 | **0.96 – 1.00** | 0.52 – 0.78 |
-| E | Vta, Vtb, Vw, Vf | 64 | **0.22 – 0.61** | 0.81 – 1.07 |
+| driver | families | routes | runs | runs ≥ 0.70 | coupling range | hours |
+|---|---|---|---|---|---|---|
+| A | S | 6 | 9 | **9 / 9** | 0.76 – 1.00 | 8.48 |
+| B | M | 1 | 2 | **2 / 2** | 0.99 – 1.00 | 2.94 |
+| D | Y | 1 | 1 | **1 / 1** | 0.96 | 1.86 |
+| E | Vta, Vtb, Vw, Vf | 64 | 39 | **4 / 39** | 0.21 – 0.89 | 14.68 |
+
+It is a strong association, **not a clean partition** — and an earlier version of
+this file overstated it as one. Every A/B/D run is well coupled (the weakest is
+0.76), and 35 of driver E's 39 runs fall below the 0.70 threshold. But four short
+driver-E runs do pass, scoring 0.74–0.89 and totalling 0.38 h, so they sit in the
+trusted pool alongside A/B/D. Phone accelerometer noise (|acc| std) is 0.52–0.78
+for A/B/D against 0.81–1.07 for driver E.
 
 Driver E's phone is flat like the others (mean accelerometer direction ≈
 (0, 0, 1), so no tilt to correct for), and a wide ±300 s lag search finds no
@@ -138,6 +150,12 @@ mounted phone and evaluating on a sliding one would measure the wrong thing.
 Whether the extra data actually helps is a testable question, not an assumption —
 `train.py --min-coupling` runs it both ways. Trained identically and evaluated on
 the same rigidly-coupled held-out route:
+
+*Measured on the pre-augmentation model (centred gravity filter, no rotation
+augmentation), which is the configuration the comparison was run under. The
+absolute numbers are therefore superseded by the results table above; the
+comparison between the two rows is what this table is for, and that conclusion
+still stands.*
 
 | training data | speed MAE | Δψ MAE | 10 s | 30 s | 60 s | 120 s |
 |---|---|---|---|---|---|---|
@@ -187,7 +205,7 @@ a real car.
 ## Model
 
 A small **dilated causal TCN**: 14 input channels × **80 samples (8 s of context
-at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.110 ms/window**
+at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.118 ms/window**
 (ONNX) and **0.067 ms/window** (TFLite) on laptop CPU. Receptive field 63
 samples, covering the context.
 
@@ -230,10 +248,37 @@ That the optimum is time-varying rather than constant is the argument for role 0
 owning this in the EKF, where a Kalman gain responds to growing process
 covariance automatically instead of us hand-tuning τ.
 
+### Mount-rotation augmentation (on by default)
+
+Every phone in IO-VNBD lay flat — mean accelerometer direction ≈ (0, 0, 1) in all
+51 runs — while the product puts one in a dashboard mount at an arbitrary angle.
+Nine of the fourteen channels are raw body axes, so they go out of distribution
+the moment the phone is tilted. Measured on the held-out route, applying a
+simulated mount rotation (random azimuth, tilt up to 60°):
+
+| training | unrotated 30 s | rotated 30 s | degradation | 60 s |
+|---|---|---|---|---|
+| 14 ch, no augmentation | 33.8 m | **186.5 m** | **5.5×** (speed MAE 26.8×) | 70.0 m |
+| 5 invariant channels only | 37.5 m | 37.5 m | **1.000× — bit-identical** | 70.3 m |
+| **14 ch + rotation augmentation** | **32.8 m** | 33.3 m | **1.01×** | **59.1 m** |
+
+Untreated, the model is worse than the no-ML baseline once the phone is tilted.
+Augmentation removes that **and improves accuracy** — 60 s error fell 16 % — so it
+is the default (`train.py --rotate-aug`). The 5-channel invariant subset
+(`--invariant-only`) is kept as a fallback with a *provable* guarantee rather
+than an empirical one: the gravity-projected channels are exactly invariant
+because a fixed mount rotation commutes with the (linear) gravity filter. That
+identity is asserted on real data in `tests/test_augment.py`.
+
 Three further properties it is built to have:
 
 - **Causal.** A window ending now uses only samples ≤ now, because the phone
-  cannot see the future.
+  cannot see the future. This was briefly *not* true: gravity was estimated with
+  a centred `np.convolve(..., mode="same")`, which averaged ~10 s of future
+  samples into the current row. It is now a causal one-pole EMA — what a handset
+  could actually run — with the settling transient marked invalid so no window
+  trains on it. Two tests pin it, one textual and one behavioural (perturb a
+  future sample, assert earlier outputs are unchanged).
 - **Attitude-invariant inputs.** A dashboard-mounted phone sits at an arbitrary
   angle, so alongside the 9 raw channels we feed 5 derived ones computed by
   projecting onto the measured gravity direction: `acc_norm`, `acc_vert`,
@@ -244,6 +289,189 @@ Three further properties it is built to have:
 - **SI units at the boundary.** Input normalisation and output de-normalisation
   are constant buffers *inside* the graph, so the phone and the C++ engine have
   nothing to reimplement and cannot disagree with training about scaling.
+
+## Results
+
+Median position error after a GNSS blackout. **These are the cross-validated
+numbers** — 5 folds over all 12 trusted routes,
+each route held out in turn, 4659 blackout start points at 30 s:
+
+| Blackout | Driftless | p90 | Drift | Baseline (no ML) | Oracle floor |
+|---|---|---|---|---|---|
+| **10 s** | **11.18 m** | 29.3 m | 13.2 % | 28.66 m | 1.5 m |
+| **30 s** | **42.09 m** | 118.41 m | 18.3 % | 163.46 m | 6.21 m |
+| **60 s** | **88.17 m** | 256.01 m | 18.9 % | 365.7 m | 17.85 m |
+| **120 s** | **191.74 m** | 559.22 m | 19.7 % | 727.02 m | 50.45 m |
+
+Per-window across folds: speed MAE **2.242
+± 0.349 m/s**, heading MAE
+**1.624 ±
+0.71°**.
+
+At 30 s the model is **3.9×**
+better than dead reckoning without ML, and at 120 s
+**3.8×**. The oracle row is
+the floor: what perfect speed and heading would still cost, given that position
+comes from integration.
+
+Regenerate with `python -m driftless_train.crossval --k 5` (or
+`--rebuild-docs` to re-aggregate saved samples); numbers come from
+`artifacts/metrics/crossval.json`.
+
+### On the single held-out split
+
+The shipped checkpoint is trained on the frozen 70/15/15 split and evaluated on
+its one test route, which is what `evaluate.py` reports:
+
+| Blackout | Driftless | p90 | Drift | Baseline (no ML) | Oracle floor |
+|---|---|---|---|---|---|
+| **10 s** | **8.6 m** | 21.2 m | 12.0 % | 30.2 m | 1.4 m |
+| **30 s** | **31.4 m** | 70.4 m | 15.2 % | 163.5 m | 4.6 m |
+| **60 s** | **57.6 m** | 146.4 m | 15.1 % | 354.7 m | 11.9 m |
+| **120 s** | **117.6 m** | 331.0 m | 13.9 % | 574.9 m | 29.0 m |
+
+Per-window: speed MAE **1.544 m/s**, heading MAE **1.07°** — against **15.71°**
+for raw gyro integration, i.e. **14.7× better**.
+
+These are the numbers for the artefact that actually ships, so they are kept
+here — but that route turns out to be the easiest of the eleven, so they are not
+the ones to quote. Regenerate with
+`python -m driftless_train.evaluate --split test`; source
+`artifacts/metrics/eval_summary.json`.
+
+### How the cross-validation was built, and what it changed
+
+The single-split table above holds out one route. To find out whether that road
+was representative, `crossval.py` deals the trusted routes into
+duration-balanced folds and trains one model per fold through the *same*
+`train.fit` the shipped model uses, so the estimate is of this model rather than
+a lookalike. 11 of 12 routes yield blackout samples; the twelfth is shorter than
+the shortest blackout and contributes training data only.
+
+Fold-to-fold spread at 30 s: **42.244 ± 5.243 m** (range 35.7–49.25 m). Speed
+MAE **2.242 ± 0.349 m/s**, Δψ MAE **1.624 ± 0.71°**.
+
+**The honest headline is the cross-validated one.** Pooled 30 s error is
+**42.09 m** against **31.39 m** on the single test route — **1.34× worse**.
+Cross-validated on its own, **S/S1** is the easiest of the 11 evaluated routes
+at 30 s (32.45 m, against a per-route median of 43.94 m), so the single-split
+number is the optimistic end of this model's range rather than its centre. Two
+effects are mixed in and 12 routes cannot fully separate them: each fold model
+trains on ~3/5 of the trusted pool, which pushes its error *up*, while the test
+route is genuinely easier, which pushes the single-split figure *down*. Both
+numbers are quoted everywhere; the cross-validated one leads.
+
+Per route, each tested out-of-sample by the one fold that held it out:
+
+| route | h | 10 s | 30 s | 60 s | 120 s | n at 30 s |
+|---|---|---|---|---|---|---|
+| S/S1 | 1.437 | 8.75 m | **32.45 m** | 61.18 m | 113.47 m | 507 |
+| S/S3b | 0.189 | 7.88 m | **34.22 m** | 45.77 m | 81.01 m | 55 |
+| S/S4 | 2.527 | 10.0 m | **35.14 m** | 68.98 m | 139.92 m | 870 |
+| Vw/Vw05 ⚠ | 0.028 | 12.14 m | **40.89 m** | 140.66 m | — | 4 |
+| S/S3a | 0.684 | 11.02 m | **41.35 m** | 82.07 m | 173.06 m | 240 |
+| S/S2 | 2.608 | 11.32 m | **43.94 m** | 95.65 m | 232.96 m | 911 |
+| M/M (Driver B) | 2.944 | 10.98 m | **46.78 m** | 106.0 m | 239.75 m | 954 |
+| S/S3c | 1.033 | 13.24 m | **47.66 m** | 95.68 m | 248.12 m | 365 |
+| Y/Y1 | 1.859 | 13.78 m | **51.52 m** | 106.05 m | 211.23 m | 644 |
+| Vta/Vta24 ⚠ | 0.033 | 18.29 m | **58.41 m** | 97.15 m | — | 5 |
+| Vta/Vta02 | 0.305 | 17.38 m | **59.72 m** | 152.68 m | 420.69 m | 104 |
+
+Sorted easiest first. `—` means the route is shorter than the blackout. **⚠
+marks fewer than 30 samples at 30 s** — indicative only. Across the 9 routes
+with enough samples the 30 s median spans **32.45 m (S/S1) to 59.72 m
+(Vta/Vta02)**, a factor of 1.8 — precisely why one held-out road is not enough.
+Rebuild the tables from saved samples with `python -m driftless_train.crossval
+--rebuild-docs`; full detail in `artifacts/metrics/crossval.md`.
+
+## The speed head reads vibration — and that is a real limitation
+
+Role 04/05 asked whether the edge engine can reuse this model on FOG-grade
+inertial input. Answering it turned up something that matters more for our own
+model than for the edge tier.
+
+There is **no FOG-grade data in IO-VNBD** to test against, so the shift is
+simulated instead: low-pass the held-out phone channels and re-derive the
+attitude-invariant features. That removes the high-frequency content a cleaner
+sensor would not have, and simultaneously simulates the anti-alias filtering
+that decimating a 200 Hz FOG stream to 10 Hz applies. Ratios are paired per
+route against that route's own native result, so route difficulty cancels.
+
+| tier | acc HF removed | speed MAE | Δψ MAE | 30 s blackout |
+|---|---|---|---|---|
+| native phone | — | 1.00× | 1.00× | 1.00× (32.67 m) |
+| low-pass 4 Hz | 11 % | 1.108× | 0.987× | **1.024×** (33.58 m) |
+| low-pass 2 Hz | 33 % | 2.288× | 1.015× | **2.107×** (69.81 m) |
+| low-pass 1 Hz | 45 % | 3.446× | 1.038× | **3.496×** (114.99 m) |
+| low-pass 0.5 Hz | 50 % | 4.035× | 1.05× | **4.32×** (142.02 m) |
+
+**Heading is untouched; speed collapses.** Δψ error stays within 1.05× at every
+cutoff, while speed MAE degrades up to 4.0×. The reason is that the band being
+removed is not noise — it is a speed cue. Across 3 held-out runs (7081 windows)
+high-frequency energy correlates with true speed at **+0.640** (range +0.494 to
++0.722 by route, which is road surface):
+
+| speed band | n | HF accel RMS (m/s²) |
+|---|---|---|
+| 0–2 m/s | 1275 | 0.2845 |
+| 2–5 m/s | 662 | 0.5527 |
+| 5–10 m/s | 2212 | 0.7794 |
+| 10–15 m/s | 1999 | 1.007 |
+| 15–20 m/s | 551 | 0.9102 |
+| 20–30 m/s | 379 | 0.8929 |
+
+Road, tyre and engine vibration grows with speed, so the model has learned to
+use vibration amplitude as a partial speedometer. Note it **saturates above ~10
+m/s** — it separates 0 from 10 m/s well and 20 from 30 m/s barely. Yaw rate
+needs no such cue, because heading dynamics live below 2 Hz.
+
+Two consequences, and the second is the important one:
+
+1. **The edge tier needs its own model and its own data.** Reusing this one on
+   decimated FOG input removes precisely the band its speed head depends on.
+2. **A different vehicle or handset is an untested shift for the shipped model.**
+   The cross-validation varied route and driver but held vehicle, handset and
+   mount fixed, so it is blind to this dependence by construction. The reported
+   numbers do not cover a different car, tyres, mount or phone.
+
+### Training the shortcut away — and what that measures
+
+The fix is the same shape as the one that fixed mount sensitivity: train on
+low-passed copies of every run (`--lowpass-aug 4 2 1`) so the model cannot lean
+on any single frequency band. Measured on the same held-out runs, same routes,
+so route difficulty cancels — 30 s blackout error relative to each model's own
+native result:
+
+| 30 s blackout, relative to native | native | 4 Hz | 2 Hz | 1 Hz | 0.5 Hz |
+|---|---|---|---|---|---|
+| shipped (`tcn_best.pt`) | 32.67 m | 1.02× | 2.11× | 3.50× | 4.32× |
+| `--lowpass-aug 4 2 1` | 35.23 m | **0.99×** | **0.99×** | **1.01×** | **1.48×** |
+
+**The dependence is gone.** And 0.5 Hz was never trained on — the cutoffs were
+4/2/1 — so the model learned not to rely on high-frequency content in general
+rather than memorising the three tiers it saw. Heading improves slightly under
+low-pass (0.88× at 2 Hz).
+
+The price is **8% on the native phone tier** (32.67 → 35.23 m). That figure is
+the useful part: it is the size of the vibration shortcut, i.e. how much of the
+shipped model's accuracy comes from a cue specific to this vehicle, mount and
+road surface. Read the other way, **the headline numbers above are ~8%
+optimistic for any vehicle that is not the IO-VNBD one.**
+
+**The shipped checkpoint is still `tcn_best.pt`**, because the phone path *is*
+the native tier and it is better there (30 s on test: 31.39 m vs 33.26 m). The
+augmented recipe is the one to fine-tune from for a different vehicle, handset
+or a cleaner IMU — which makes the edge tier's data collection plausibly a
+fine-tune rather than a from-scratch dataset. Checkpoints are gitignored, so
+that is a retrain, not a file to copy.
+
+Caveat unchanged: there is still no FOG data to validate the simulation
+against, so this bounds the architecture's response to losing high-frequency
+content. It does not certify FOG performance.
+
+`python -m driftless_train.sensor_tier`, and
+`--ckpt <augmented> --tag lpaug` for the second row; detail in
+`artifacts/metrics/sensor_tier.md` and `sensor_tier_lpaug.md`.
 
 ## Evaluation: the question a judge will ask
 
@@ -265,8 +493,8 @@ memorise a road instead of learning vehicle dynamics.
 
 | | Size | Parity vs PyTorch | Latency | Input |
 |---|---|---|---|---|
-| **ONNX** (C++ edge engine) | 120.6 KB | 9.7e-7 rel | 0.118 ms/window | `[1, 14, 80]` **NCW** |
-| **TFLite** (Android app) | 182.3 KB | 1.09e-6 rel | 0.067 ms/window | `[1, 80, 14]` **NWC** |
+| **ONNX** (C++ edge engine) | 218.3 KB (one self-contained file) | 2.3e-06 rel | 0.116 ms/window | `[1, 14, 80]` **NCW** |
+| **TFLite** (Android app) | 182.3 KB | 1.5e-06 rel | 0.068 ms/window | `[1, 80, 14]` **NWC** |
 
 Note the layouts differ — TFLite is channels-last (time-major), which is the
 natural layout for an Android ring buffer anyway. Parity is asserted numerically
@@ -366,3 +594,54 @@ python export/to_tflite.py --copy-to-consumers
 # tcn_speed_heading.tflite -> android/app/src/main/assets/models/
 # tcn_speed_heading.onnx    -> edge-engine/models/
 ```
+
+## Handover artefacts for role 02 (fusion)
+
+`artifacts/metrics/measurement_noise.md` derives the filter's measurement noise
+from held-out residuals, in the terms the UKF reasons about:
+
+- Forward-speed measurement: **σ = 2.893 m/s**, pooled over both
+  held-out routes, with a per-speed-band table because the error scales with
+  speed. An earlier version of this section quoted **σ = 2.20** from the *test*
+  split alone — one route — which is ~30 % optimistic and was corrected here
+  and in role 02's filter.
+- **Do not hard-code the bias.** It is not a property of the model: it is
+  **+0.4853 m/s** on S/S1 and
+  **-0.5536 m/s** on S/S4 — it
+  changes sign between held-out routes, because it comes from each route's speed
+  distribution interacting with a shrinkage estimator, not from a sensor offset.
+  Applying one route's value to the other measurably worsens both bias and MAE.
+  Use **0.0** unless you have a per-deployment calibration.
+- Heading change: **σ = 1.415°** per 2 s.
+- **The correlation warning.** Consecutive predictions share most of their 8 s
+  context, so the residuals are not independent: speed lag-1 autocorrelation
+  **0.7662**, decorrelation time
+  **8 s** — exactly the context length.
+  Feeding one measurement every 2 s as if independent over-informs the filter by
+  about **2×** in σ. This is the same trap
+  `ukf_fusion_engine.h` already documents for the non-holonomic constraint, where
+  an over-tight σ at high rate collapsed the attitude covariance and made the
+  filter reject 21 honest GNSS fixes after a blackout.
+
+The measurement is the **longitudinal** body-velocity component — the one axis
+the non-holonomic constraint deliberately leaves free — so it fits the existing
+`updateUnscented` path with no new filter code. The file contains the snippet.
+
+## IMU noise characterisation
+
+`artifacts/metrics/allan_imu_noise.md` addresses the handset half of the TODO in
+`edge-engine/include/driftless/imu_noise.h` (*"fit from Allan deviation once
+IO-VNBD / FOG logs are in hand"*), using overlapping Allan deviation over
+**4,864 s** of stationary data in 106 spans.
+
+Two of the four parameters turned out **not to be identifiable** from this data,
+and the module refuses to report them rather than returning a number: in the
+10–60 s window where bias instability should make the curve rise at +½, it is
+still falling at ≈ −½ on every axis, so the bias-instability floor is never
+reached within the available spans. The gyro white-noise fit is also contaminated
+— its Allan deviation is flat-to-rising at short τ, the signature of a periodic
+disturbance, because the vehicle is stopped but the engine is idling.
+
+The fix is a capture nobody has taken yet: phone flat on a desk, **engine off**,
+10 minutes at `SENSOR_DELAY_FASTEST`. Then all four parameters become
+identifiable. That is a ten-minute role 01 task.

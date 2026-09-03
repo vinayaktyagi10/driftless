@@ -21,15 +21,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from .paths import MANIFEST_PATH, RAW_DIR
 
 REPO = "onyekpeu/IO-VNBD"
 REF = "master"
 TREE_API = f"https://api.github.com/repos/{REPO}/git/trees/{REF}?recursive=1"
 MEDIA_BASE = f"https://media.githubusercontent.com/media/{REPO}/{REF}"
-
-from .paths import MANIFEST_PATH, RAW_DIR
 
 LFS_POINTER_MAGIC = b"version https://git-lfs"
 
@@ -158,7 +158,8 @@ def download(seq: Sequence, force: bool = False, retries: int = 3) -> tuple[bool
     last_err = ""
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(seq.url, headers={"User-Agent": "driftless-ml"})
+            req = urllib.request.Request(
+                seq.url, headers={"User-Agent": "driftless-ml"})
             with urllib.request.urlopen(req, timeout=300) as r, tmp.open("wb") as out:
                 total = int(r.headers.get("content-length", 0))
                 got = 0

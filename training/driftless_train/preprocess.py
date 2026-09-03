@@ -16,8 +16,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .geo import latlon_to_enu, wrap_deg180, wrap_pi
-from .schema import DT_S_TARGET, FS_HZ_TARGET, IMU_CHANNELS, load_raw_csv
+from .geo import latlon_to_enu
+from .schema import IMU_CHANNELS, load_raw_csv
 
 # Derived, rotation-invariant channels appended to the raw IMU channels.
 DERIVED_CHANNELS: tuple[str, ...] = (
@@ -32,6 +32,15 @@ FEATURE_CHANNELS: tuple[str, ...] = IMU_CHANNELS + DERIVED_CHANNELS
 
 # Quality thresholds. Deliberately conservative: the label is GNSS, so a window
 # labelled from a bad fix teaches the model the wrong thing.
+# Gravity is tracked with a CAUSAL one-pole low-pass. The earlier version used
+# np.convolve(..., mode="same"), which is centred -- it averaged ~10 s of FUTURE
+# samples into the gravity estimate for the current row. That silently broke the
+# causality guarantee the rest of the pipeline is built on (a window ending now
+# must use only samples <= now), and it is not something a phone could reproduce
+# in real time. A one-pole EMA is what a handset would actually run.
+GRAVITY_TAU_S = 10.0
+GRAVITY_WARMUP_S = 30.0    # 3 time constants; the transient is not trained on
+
 MAX_DT_MS = 500.0          # a real sampling hole, not jitter
 MAX_GPS_ACCURACY_M = 10.0
 MIN_SATS_USED = 4
@@ -57,7 +66,7 @@ def split_runs(df: pd.DataFrame) -> list[pd.DataFrame]:
     bounds = np.r_[0, resets, len(df)]
 
     runs: list[pd.DataFrame] = []
-    for k, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+    for k, (a, b) in enumerate(zip(bounds[:-1], bounds[1:], strict=True)):
         if b - a < MIN_RUN_ROWS:
             continue
         run = df.iloc[a:b].copy().reset_index(drop=True)
@@ -112,6 +121,75 @@ def _add_time(df: pd.DataFrame) -> pd.DataFrame:
 GYRO_XYZ_COLUMNS: tuple[str, str, str] = ("gyro_yaw", "gyro_roll", "gyro_pitch")
 
 
+def _causal_gravity(acc: np.ndarray, dt_s: float,
+                    tau_s: float = GRAVITY_TAU_S) -> np.ndarray:
+    """Causal one-pole low-pass of the accelerometer -> gravity direction.
+
+    y[n] = a*y[n-1] + (1-a)*x[n] with a = exp(-dt/tau), initialised so y[0]=x[0].
+
+    Being linear matters beyond causality: a fixed mount rotation R commutes with
+    this filter, so lowpass(R*acc) == R*lowpass(acc) exactly. That is what makes
+    the gravity-projected channels provably invariant to how the phone is mounted
+    (see augment.py), rather than approximately so.
+    """
+    from scipy.signal import lfilter
+
+    if not np.isfinite(dt_s) or dt_s <= 0:
+        dt_s = 0.1
+    a = float(np.exp(-dt_s / tau_s))
+    b, a_coef = [1.0 - a], [1.0, -a]
+    out = np.empty_like(acc, dtype=float)
+    for i in range(acc.shape[1]):
+        x = acc[:, i]
+        # zi chosen so the filter starts at the first sample instead of at zero,
+        # which would otherwise take ~tau to climb to 9.8 and corrupt the start.
+        out[:, i] = lfilter(b, a_coef, x, zi=np.array([x[0] * a]))[0]
+    return out
+
+
+def imu_derived(acc: np.ndarray, gyr: np.ndarray, dt_s: float,
+                grav_fallback: np.ndarray | None = None
+                ) -> dict[str, np.ndarray]:
+    """Compute the five attitude-invariant channels from raw acc/gyro arrays.
+
+    Array-level core shared by preprocessing and by `sensor_tier`, which needs to
+    recompute these after altering the raw channels. Kept as one implementation
+    because `acc_norm` is nonlinear: filtering the derived channels is NOT the
+    same as filtering the raw axes and re-deriving, so a second copy of this
+    maths would silently diverge.
+
+    `acc` and `gyr` are (N, 3); `gyr` columns must already be in the physical
+    x/y/z order of GYRO_XYZ_COLUMNS.
+    """
+    lp = _causal_gravity(acc, dt_s=dt_s)
+    # Repair ONLY the rows the recursion actually poisoned. `_causal_gravity` is
+    # a one-pole IIR filter, so a single non-finite sample at row j makes every
+    # row from j onward non-finite -- but rows before j are converged and valid.
+    # Swapping the whole run for the crude gravity column threw those away too,
+    # degrading acc_vert/acc_horiz/gyro_vert/gyro_horiz for the entire run
+    # because of one bad sample.
+    bad = ~np.isfinite(lp).all(axis=1)
+    if bad.any() and grav_fallback is not None:
+        lp = lp.copy()
+        lp[bad] = grav_fallback[bad]
+    g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
+    # Where the estimate is degenerate, fall back to the reported gravity, then
+    # to +Z, so the projection stays finite. Such rows are flagged invalid anyway.
+    g_hat = np.where(g_norm > 1e-3, lp / np.maximum(g_norm, 1e-9),
+                     np.array([0.0, 0.0, 1.0]))
+
+    acc_norm = np.linalg.norm(acc, axis=1)
+    acc_vert = np.einsum("ij,ij->i", acc, g_hat)
+    acc_horiz = np.sqrt(np.maximum(acc_norm**2 - acc_vert**2, 0.0))
+
+    gyro_vert = np.einsum("ij,ij->i", gyr, g_hat)
+    gyro_norm = np.linalg.norm(gyr, axis=1)
+    gyro_horiz = np.sqrt(np.maximum(gyro_norm**2 - gyro_vert**2, 0.0))
+
+    return {"acc_norm": acc_norm, "acc_vert": acc_vert, "acc_horiz": acc_horiz,
+            "gyro_vert": gyro_vert, "gyro_horiz": gyro_horiz}
+
+
 def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     """Project the IMU onto the gravity frame to get attitude-invariant channels.
 
@@ -127,34 +205,10 @@ def _add_imu_features(df: pd.DataFrame) -> pd.DataFrame:
     acc = df[["acc_x", "acc_y", "acc_z"]].to_numpy(dtype=float)
     gyr = df[list(GYRO_XYZ_COLUMNS)].to_numpy(dtype=float)
     grv = df[["grav_x", "grav_y", "grav_z"]].to_numpy(dtype=float)
+    dt_s = float(np.median(np.diff(df["t_s"].to_numpy())) if len(df) > 1 else 0.1)
 
-    # Low-pass the accelerometer over ~20 s to recover the gravity direction.
-    n = min(len(df), 201)
-    if n >= 5:
-        k = np.ones(n) / n
-        lp = np.stack([np.convolve(acc[:, i], k, mode="same") for i in range(3)],
-                      axis=1)
-    else:
-        lp = grv
-    g_norm = np.linalg.norm(lp, axis=1, keepdims=True)
-    # Where the estimate is degenerate, fall back to the reported gravity, then
-    # to +Z, so the projection stays finite. Such rows are flagged invalid anyway.
-    g_hat = np.where(g_norm > 1e-3, lp / np.maximum(g_norm, 1e-9),
-                     np.array([0.0, 0.0, 1.0]))
-
-    acc_norm = np.linalg.norm(acc, axis=1)
-    acc_vert = np.einsum("ij,ij->i", acc, g_hat)
-    acc_horiz = np.sqrt(np.maximum(acc_norm**2 - acc_vert**2, 0.0))
-
-    gyro_vert = np.einsum("ij,ij->i", gyr, g_hat)
-    gyro_norm = np.linalg.norm(gyr, axis=1)
-    gyro_horiz = np.sqrt(np.maximum(gyro_norm**2 - gyro_vert**2, 0.0))
-
-    df["acc_norm"] = acc_norm
-    df["acc_vert"] = acc_vert
-    df["acc_horiz"] = acc_horiz
-    df["gyro_vert"] = gyro_vert
-    df["gyro_horiz"] = gyro_horiz
+    for name, col in imu_derived(acc, gyr, dt_s, grav_fallback=grv).items():
+        df[name] = col
     return df
 
 
@@ -214,8 +268,16 @@ def _add_validity(df: pd.DataFrame) -> pd.DataFrame:
     feat_ok = np.isfinite(df[list(FEATURE_CHANNELS)].to_numpy(dtype=float)).all(axis=1)
     dt_ok = ~df["gap"].to_numpy(dtype=bool)
 
+    # The gravity EMA needs ~3 time constants to settle; windows overlapping the
+    # transient would see a wrong vertical direction.
+    warmup = np.zeros(len(df), dtype=bool)
+    n_warm = int(GRAVITY_WARMUP_S / max(float(np.median(np.diff(
+        df["t_s"].to_numpy()))) if len(df) > 1 else 0.1, 1e-6))
+    warmup[:min(n_warm, len(df))] = True
+    df["gravity_warmup"] = warmup
+
     df["valid_gnss"] = acc_ok & sats_ok & speed_ok
-    df["valid_imu"] = feat_ok & dt_ok
+    df["valid_imu"] = feat_ok & dt_ok & ~warmup
     df["valid"] = df["valid_gnss"] & df["valid_imu"]
     return df
 
@@ -225,8 +287,7 @@ def preprocess_run(run: pd.DataFrame) -> pd.DataFrame:
     df = _add_time(run)
     df = _add_imu_features(df)
     df = _add_gnss_truth(df)
-    df = _add_validity(df)
-    return df
+    return _add_validity(df)
 
 
 def preprocess_frame(raw: pd.DataFrame) -> list[pd.DataFrame]:
@@ -264,6 +325,7 @@ def preprocess_report(df: pd.DataFrame) -> dict:
         "speed_ms_mean_moving": float(np.nanmean(v_doppler)) if v_doppler.size else 0.0,
         "speed_ms_max": float(np.nanmax(df["gt_speed_ms"])),
         "speed_resid_mae_ms": float(np.abs(resid).mean()) if resid.size else np.nan,
-        "speed_resid_p95_ms": float(np.percentile(np.abs(resid), 95)) if resid.size else np.nan,
+        "speed_resid_p95_ms": (float(np.percentile(np.abs(resid), 95))
+                               if resid.size else np.nan),
         "gap_count": int(df["gap"].sum()),
     }

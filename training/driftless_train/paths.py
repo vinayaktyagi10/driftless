@@ -34,5 +34,21 @@ EVIDENCE_PATH = ARTIFACT_DIR / "ROUND1_EVIDENCE.md"
 
 # Where the other roles' builds expect the exported models. to_tflite.py can copy
 # there; the files themselves are produced by driftless_train.export.
-ANDROID_ASSETS_DIR = REPO_ROOT / "android" / "app" / "src" / "main" / "assets" / "models"
+ANDROID_ASSETS_DIR = (REPO_ROOT / "android" / "app" / "src" / "main"
+                      / "assets" / "models")
 EDGE_MODELS_DIR = REPO_ROOT / "edge-engine" / "models"
+
+
+def rel_to_repo(p: Path | str) -> str:
+    """Repo-relative path string, for anything written into a tracked artifact.
+
+    A committed artifact must not bake in the absolute path of whichever machine
+    produced it: it leaks a local directory layout and makes the file differ
+    between contributors for no reason. Falls back to the absolute path for
+    anything outside the repo, which is better than raising.
+    """
+    p = Path(p).resolve()
+    try:
+        return str(p.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(p)

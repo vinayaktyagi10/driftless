@@ -4,8 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from driftless_train.pair import (MIN_ALIGN_CORR, Alignment, estimate_alignment,
-                            sod_from_date, split_v_runs)
+from driftless_train.pair import (
+    MIN_ALIGN_CORR,
+    estimate_alignment,
+    sod_from_date,
+    split_v_runs,
+)
 
 
 def _make_pair(tz_offset_s: float, lag_s: float, n: int = 3000, fs: float = 10.0):

@@ -8,7 +8,7 @@ Normalisation lives inside the graph, so neither consumer has to reimplement it.
 Every export is checked numerically against PyTorch before it is accepted -- a
 silently wrong export is worse than a missing one, because it fails on stage.
 
-Run:  python -m driftless.export
+Run:  python -m driftless_train.export
 """
 
 from __future__ import annotations
@@ -21,8 +21,7 @@ import numpy as np
 import torch
 
 from .evaluate import load_model
-
-from .paths import MODEL_DIR
+from .paths import MODEL_DIR, rel_to_repo
 
 # Parity tolerance is expressed as a fraction of each output's own standard
 # deviation, not as a raw absolute number. The outputs are in SI units (speed in
@@ -32,13 +31,26 @@ from .paths import MODEL_DIR
 TOL_ONNX_FRAC = 1e-3
 TOL_TFLITE_FRAC = 2e-2
 
+# Per-node ONNX metadata that records where in the *exporting* machine's source
+# tree each node came from. `pkg.torch.onnx.stack_trace` is the one that carries
+# absolute paths; the rest of torch's metadata (namespace, class hierarchy) is
+# path-free and useful when reading the graph, so it stays.
+STRIP_KEYS = ("pkg.torch.onnx.stack_trace",)
 
-def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0) -> np.ndarray:
+
+
+def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0,
+                  channels: np.ndarray | None = None) -> np.ndarray:
     """Windows for parity testing: real recorded ones if we have them.
 
     Synthetic Gaussian noise is a poor parity test -- it lands far outside the
     input distribution, where the graphs can differ in ways that never occur in
     service. Real windows test the region the model actually operates in.
+
+    `channels` is the checkpoint's channel subset (`--invariant-only` trains on 5
+    of the 14). The .npz files always hold all 14, so without subsetting here an
+    invariant-only export fed the model 14 channels and crashed instead of
+    exporting.
     """
     from .dataset import PROC_DIR
     proc = sorted(PROC_DIR.glob("*.npz"))
@@ -50,13 +62,19 @@ def sample_inputs(n_ch: int, win: int, n: int = 64, seed: int = 0) -> np.ndarray
             step = max((len(feats) - win) // 32, 1)
             for start in range(0, len(feats) - win, step):
                 if valid[start:start + win].all():
-                    xs.append(feats[start:start + win].T)
+                    w = feats[start:start + win].T
+                    xs.append(w if channels is None else w[channels])
                 if len(xs) >= n:
                     break
             if len(xs) >= n:
                 break
         if len(xs) >= 8:
-            return np.stack(xs[:n]).astype(np.float32)
+            out = np.stack(xs[:n]).astype(np.float32)
+            if out.shape[1] != n_ch:
+                raise ValueError(
+                    f"sampled windows have {out.shape[1]} channels but the "
+                    f"checkpoint expects {n_ch}")
+            return out
 
     rng = np.random.default_rng(seed)
     x = rng.normal(0.0, 1.0, size=(n, n_ch, win)).astype(np.float32)
@@ -78,24 +96,69 @@ def _parity(y_ref: np.ndarray, y_new: np.ndarray, frac: float) -> dict:
     }
 
 
-def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
+def _strip_debug_info(path: Path) -> int:
+    """Remove embedded Python stack traces from an exported ONNX graph.
+
+    torch.onnx.export records, for every node, the source file and line it came
+    from -- including absolute paths inside the exporting machine's virtualenv.
+    That put 283 copies of one contributor's home directory into a tracked
+    artifact that ships to the edge engine. The traces are debug metadata only;
+    ONNX Runtime does not read them. Returns bytes saved.
+
+    Called BEFORE the parity check, so parity is measured on the file we ship.
+    """
+    try:
+        import onnx
+    except ImportError:
+        return 0
+    before = path.stat().st_size
+    m = onnx.load(str(path))
+
+    def scrub(nodes):
+        for node in nodes:
+            node.doc_string = ""
+            keep = [q for q in node.metadata_props if q.key not in STRIP_KEYS]
+            del node.metadata_props[:]
+            node.metadata_props.extend(keep)
+
+    m.doc_string = ""
+    scrub(m.graph.node)
+    for f in m.functions:
+        f.doc_string = ""
+        scrub(f.node)
+    del m.metadata_props[:]
+    onnx.save(m, str(path))
+    return before - path.stat().st_size
+
+
+def export_onnx(model, n_ch: int, win: int, out: Path,
+                channels: np.ndarray | None = None) -> dict:
     dummy = torch.zeros(1, n_ch, win, dtype=torch.float32)
+    # external_data=False keeps the weights INSIDE the .onnx. The default split
+    # them into a sidecar .onnx.data whose filename is recorded inside the model,
+    # so the pair could not be renamed independently and a consumer that copied
+    # only the .onnx got a cryptic load failure at runtime. This model is ~150 KB
+    # of weights; there is nothing to gain from external data and a whole class
+    # of deployment bug to lose.
     torch.onnx.export(
         model, (dummy,), str(out),
         input_names=["imu_window"], output_names=["speed_dpsi"],
         dynamic_axes={"imu_window": {0: "batch"}, "speed_dpsi": {0: "batch"}},
-        opset_version=18, do_constant_folding=True,
+        opset_version=18, do_constant_folding=True, external_data=False,
     )
+
+    saved = _strip_debug_info(out)
 
     import onnxruntime as ort
     sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
-    X = sample_inputs(n_ch, win)
+    X = sample_inputs(n_ch, win, channels=channels)
     with torch.no_grad():
         y_torch = model(torch.from_numpy(X)).numpy()
     y_onnx = sess.run(["speed_dpsi"], {"imu_window": X})[0]
 
-    result = {"path": str(out), "size_kb": round(out.stat().st_size / 1024, 1),
+    result = {"path": rel_to_repo(out), "size_kb": round(out.stat().st_size / 1024, 1),
               "n_test_windows": int(len(X)),
+              "debug_info_bytes_stripped": saved,
               **_parity(y_torch, y_onnx, TOL_ONNX_FRAC)}
 
     # Latency, single window -- the number role 01 and role 02 actually care about.
@@ -112,7 +175,8 @@ def export_onnx(model, n_ch: int, win: int, out: Path) -> dict:
 
 
 def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
-                  dilations: tuple[int, ...], model) -> dict:
+                  dilations: tuple[int, ...], model,
+                  channels: np.ndarray | None = None) -> dict:
     """Export TFLite by rebuilding the network in Keras and porting the weights.
 
     Not by converting the ONNX: onnx2tf mistranslates the residual connection in
@@ -131,7 +195,7 @@ def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
 
     km = keras_from_checkpoint(model, n_ch, win, width, n_out, dilations)
 
-    X = sample_inputs(n_ch, win, n=48)            # (N, C, W)
+    X = sample_inputs(n_ch, win, n=48, channels=channels)            # (N, C, W)
     X_nwc = np.transpose(X, (0, 2, 1))            # Keras/TFLite are channels-last
     with torch.no_grad():
         y_torch = model(torch.from_numpy(X)).numpy()
@@ -151,7 +215,7 @@ def export_tflite(out_dir: Path, n_ch: int, win: int, width: int, n_out: int,
     latency = (time.perf_counter() - t0) / N * 1000
 
     return {
-        "path": str(out),
+        "path": rel_to_repo(out),
         "size_kb": round(out.stat().st_size / 1024, 1),
         "skipped": False,
         "via": "keras weight port (not onnx2tf)",
@@ -174,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-tflite", action="store_true")
     args = ap.parse_args(argv)
 
-    model, win, out_win = load_model(args.ckpt, torch.device("cpu"))
+    model, win, out_win, chan_idx = load_model(args.ckpt, torch.device("cpu"))
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     n_ch = len(ck["channels"])
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -191,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                        "SI-unit outputs."}
 
     onnx_path = args.out_dir / "tcn_speed_heading.onnx"
-    report["onnx"] = export_onnx(model, n_ch, win, onnx_path)
+    report["onnx"] = export_onnx(model, n_ch, win, onnx_path,
+                                 channels=chan_idx)
     r = report["onnx"]
     print(f"ONNX   {'PASS' if r['passed'] else 'FAIL'}  {r['size_kb']} KB  "
           f"max rel Δ {r['max_rel_diff']:.2e} (tol {r['tolerance_rel']:.0e})  "
@@ -203,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         report["tflite"] = export_tflite(
             args.out_dir, n_ch, win, ck["width"], model.n_out,
-            tuple(1 << i for i in range(len(model.blocks))), model)
+            tuple(1 << i for i in range(len(model.blocks))), model,
+            channels=chan_idx)
     t = report["tflite"]
     if t.get("skipped"):
         print(f"TFLite SKIP  {t.get('reason','')}")

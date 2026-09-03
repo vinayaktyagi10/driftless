@@ -6,7 +6,6 @@ pipeline. They are cheap and they protect numbers that appear in the report.
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from driftless_train import schema
 from driftless_train.geo import latlon_to_enu, wrap_pi
@@ -108,11 +107,110 @@ def test_gyro_vertical_axis_is_the_pitch_labelled_column():
     assert set(GYRO_XYZ_COLUMNS) == {"gyro_yaw", "gyro_pitch", "gyro_roll"}
 
 
-def test_gravity_column_is_not_used_as_the_attitude_source():
-    """The GRAVITY column is near-constant on this dataset, so attitude comes
-    from a low-passed accelerometer instead."""
+def test_gravity_comes_from_a_causal_lowpass_of_the_accelerometer():
+    """Attitude must come from a CAUSAL low-pass of the accelerometer.
+
+    Two separate requirements, both previously violated:
+      * not the GRAVITY column -- it is near-constant (0, 0, 9.8066) on this
+        dataset and carries no attitude information;
+      * not a centred filter -- the original np.convolve(..., mode="same")
+        averaged ~10 s of FUTURE samples into the current row, which breaks the
+        causality guarantee the windowing relies on and cannot be reproduced on
+        a phone in real time.
+    """
     import inspect
 
     from driftless_train import preprocess
-    src = inspect.getsource(preprocess._add_imu_features)
-    assert "convolve" in src, "expected a low-pass of the accelerometer"
+
+    # The derived channels are computed by `imu_derived`, which
+    # `_add_imu_features` delegates to; check the whole chain so moving the maths
+    # between them cannot quietly drop the causal estimator.
+    src = (inspect.getsource(preprocess._add_imu_features)
+           + inspect.getsource(preprocess.imu_derived))
+    assert "_causal_gravity" in src, "attitude must use the causal estimator"
+    assert 'mode="same"' not in src, "centred filter reintroduced -- non-causal"
+
+    helper = inspect.getsource(preprocess._causal_gravity)
+    assert "lfilter" in helper, "expected a one-pole recursive (causal) filter"
+
+
+def test_causal_gravity_uses_no_future_samples():
+    """Behavioural, not textual: perturbing a future sample must not change the
+    gravity estimate at an earlier index."""
+    import numpy as np
+
+    from driftless_train.preprocess import _causal_gravity
+
+    rng = np.random.default_rng(0)
+    acc = rng.normal(size=(500, 3)) + np.array([0.0, 0.0, 9.81])
+    base = _causal_gravity(acc, dt_s=0.1)
+
+    bumped = acc.copy()
+    bumped[300:] += 50.0
+    after = _causal_gravity(bumped, dt_s=0.1)
+
+    assert np.allclose(base[:300], after[:300], atol=1e-12), \
+        "gravity estimate at t depends on samples after t"
+    assert not np.allclose(base[300:], after[300:]), "perturbation had no effect"
+
+
+def test_causal_gravity_commutes_with_rotation():
+    """Linearity is what makes the derived channels exactly mount-invariant."""
+    import numpy as np
+
+    from driftless_train.augment import tilt_rotation
+    from driftless_train.preprocess import _causal_gravity
+
+    rng = np.random.default_rng(1)
+    acc = rng.normal(size=(400, 3)) + np.array([0.0, 0.0, 9.81])
+    R = tilt_rotation(rng)
+
+    lp_then_rot = np.einsum("ij,kj->ik", _causal_gravity(acc, 0.1), R)
+    rot_then_lp = _causal_gravity(np.einsum("ij,kj->ik", acc, R), 0.1)
+    assert np.abs(lp_then_rot - rot_then_lp).max() < 1e-9
+
+
+def test_non_finite_sample_only_repairs_the_rows_it_poisons():
+    """One bad accelerometer sample must not discard the whole run's attitude.
+
+    `_causal_gravity` is a one-pole IIR filter, so a non-finite sample at row j
+    makes every row from j onward non-finite. The fallback to the raw GRAVITY
+    column is therefore needed -- but only from j. Replacing the entire run (the
+    original behaviour) threw away converged, valid output for rows before j and
+    silently degraded all four projected channels for the whole sequence.
+    """
+    import numpy as np
+
+    from driftless_train.preprocess import imu_derived
+
+    rng = np.random.default_rng(3)
+    n, j = 400, 250
+    acc = rng.normal(0.2, 0.5, size=(n, 3)) + np.array([0.0, 0.0, 9.81])
+    gyr = rng.normal(0.0, 0.1, size=(n, 3))
+    # A deliberately WRONG fallback, so borrowing from it is detectable.
+    grav = np.tile(np.array([9.81, 0.0, 0.0]), (n, 1))
+
+    clean = imu_derived(acc, gyr, 0.1, grav_fallback=grav)
+
+    hurt = acc.copy()
+    hurt[j, 1] = np.nan
+    got = imu_derived(hurt, gyr, 0.1, grav_fallback=grav)
+
+    for name in ("acc_vert", "acc_horiz", "gyro_vert", "gyro_horiz"):
+        # Rows before the bad sample are untouched.
+        assert np.allclose(got[name][:j], clean[name][:j], atol=1e-9), (
+            f"{name} before the bad sample changed -- valid output was discarded")
+        # Only the row whose INPUT is missing stays non-finite; a missing
+        # accelerometer sample cannot be invented, and that row is flagged
+        # invalid downstream. Everything after it is repaired.
+        nonfinite = set(np.flatnonzero(~np.isfinite(got[name])).tolist())
+        assert nonfinite <= {j}, (
+            f"{name} non-finite beyond the bad sample: "
+            f"{sorted(nonfinite - {j})[:5]} -- the IIR tail was not repaired")
+        assert np.all(np.isfinite(got[name][j + 1:])), \
+            f"{name} tail left non-finite"
+
+    # And the poisoned tail really did switch to the fallback, i.e. the test
+    # would notice if the repair silently did nothing.
+    assert not np.allclose(got["acc_vert"][j + 1:], clean["acc_vert"][j + 1:]), \
+        "expected the post-NaN rows to differ from the clean estimate"

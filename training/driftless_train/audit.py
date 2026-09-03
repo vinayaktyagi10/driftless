@@ -5,7 +5,7 @@ sampling rate; the files disagree with it and with each other. Training on the
 set as if it were homogeneous would quietly mix 20 Hz and 10 Hz sequences, and
 label 10-second GNSS intervals as if they were 100 ms ones.
 
-Run:  python -m driftless.audit
+Run:  python -m driftless_train.audit
 Out:  artifacts/metrics/dataset_audit.csv  +  dataset_audit.md
 """
 
@@ -17,15 +17,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .geo import latlon_to_enu
 from .pair import TRUSTED_COUPLING_CORR
+from .paths import METRIC_DIR as OUT_DIR
+from .paths import PROC_DIR, RAW_DIR
 from .preprocess import preprocess_frame, preprocess_report
 from .schema import load_raw_csv
 
 # Populated in main() from data/processed/index.json: coupling per prepared run.
 _PREPARED: dict[str, dict] = {}
-
-from .paths import METRIC_DIR as OUT_DIR, PROC_DIR, RAW_DIR
 
 # Usability gates for the training pool.
 #
@@ -67,7 +66,8 @@ def _audit_run(df: pd.DataFrame, path: Path, manifest: dict[str, dict]) -> dict:
         "rows": rep["rows"],
         "duration_s": round(rep["duration_s"], 1),
         "sample_dt_ms": round(float(np.median(dt)) * 1000, 1) if dt.size else np.nan,
-        "sample_hz": round(1.0 / float(np.median(dt)), 2) if dt.size and np.median(dt) > 0 else np.nan,
+        "sample_hz": (round(1.0 / float(np.median(dt)), 2)
+                      if dt.size and np.median(dt) > 0 else np.nan),
         "n_gnss_fix": int(fix_idx.size),
         "gnss_fix_dt_s": round(float(np.median(fix_dt)), 3),
         "gnss_fix_hz": round(rep["gps_fix_hz"], 3),
@@ -115,7 +115,8 @@ def write_markdown(df: pd.DataFrame, out: Path) -> None:
         "",
         "IO-VNBD is not a homogeneous set. Measured on the actual files:",
         "",
-        f"- Sample rates present: {sorted(df['sample_hz'].dropna().unique().tolist())} Hz.",
+        "- Sample rates present: "
+        f"{sorted(df['sample_hz'].dropna().unique().tolist())} Hz.",
         f"- The phone's own GNSS fix interval spans {df['gnss_fix_dt_s'].min():.2f} s "
         f"to {df['gnss_fix_dt_s'].max():.2f} s -- far too coarse to label a 2 s "
         "window, which is why ground truth comes from the paired vehicle file.",
@@ -173,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     # same directory and have a different 29-column schema.
     files = sorted(args.raw_dir.glob("S-*.csv"))
     if not files:
-        print(f"no S-*.csv in {args.raw_dir}; run `python -m driftless.download` first")
+        print(f"no S-*.csv in {args.raw_dir}; "
+              "run `python -m driftless_train.download` first")
         return 1
 
     rows = []
