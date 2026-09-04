@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Entry values are the literal SensorManager constants so AppSettings can
+         parse them straight through without a lookup table that could drift out
+         of sync with this list. -->
+    <string-array name="sensor_rate_entries">
+        <item>Fastest — as fast as the hardware allows (default)</item>
+        <item>Game — ~50 Hz, lighter on battery</item>
+        <item>UI — ~15 Hz, demo/battery-saver only</item>
+    </string-array>
+    <string-array name="sensor_rate_values">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </string-array>
+
+    <string-array name="gnss_interval_entries">
+        <item>1 s — highest fidelity (default)</item>
+        <item>2 s</item>
+        <item>5 s — battery saver</item>
+    </string-array>
+    <string-array name="gnss_interval_values">
+        <item>1000</item>
+        <item>2000</item>
+        <item>5000</item>
+    </string-array>
+</resources>

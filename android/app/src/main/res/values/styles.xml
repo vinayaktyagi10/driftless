@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Driftless" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <style name="Theme.Driftless" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- PreferenceFragmentCompat reads preferenceTheme off the activity
+             theme and throws IllegalStateException at inflate time if it is
+             absent. AppCompat themes do not define it; only the Material ones
+             do, so it has to be set by hand here. -->
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style>
 </resources>
