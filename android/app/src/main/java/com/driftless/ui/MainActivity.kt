@@ -59,6 +59,11 @@ class MainActivity : AppCompatActivity() {
 
     private var samplingJob: Job? = null
 
+    // TEMPORARY: manual blackout injection, see activity_main.xml. Withholds
+    // GNSS fixes from the engine while the raw fixes keep logging, so a real
+    // drive can produce a drift number without a real tunnel.
+    private var blackoutActive = false
+
     // Step-2 diagnostics. Written from collector coroutines on the main
     // dispatcher and read by the ticker, so no synchronisation is needed.
     private var imuCount = 0L
@@ -177,6 +182,14 @@ class MainActivity : AppCompatActivity() {
         binding.recentreButton.setOnClickListener { track.recentre() }
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        // TEMPORARY: manual blackout injection, see activity_main.xml.
+        binding.blackoutButton.setOnClickListener {
+            blackoutActive = !blackoutActive
+            logger.logBlackout(blackoutActive, SystemClock.elapsedRealtimeNanos())
+            binding.blackoutButton.setText(
+                if (blackoutActive) R.string.action_stop_blackout else R.string.action_start_blackout
+            )
         }
         // TODO(step 5): draw the fused position instead of the raw fix, and
         // start feeding the dead-reckoning-only track alongside it.
@@ -312,7 +325,14 @@ class MainActivity : AppCompatActivity() {
                             latestFix = fix
                             lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
 
-                            engine.updateGnss(fix)
+                            // Withheld from the engine, not from the log — a
+                            // blackout is a test of what the engine does
+                            // without a fix, and the fix must survive
+                            // untouched as the ground truth to score that
+                            // against afterwards.
+                            if (!blackoutActive) {
+                                engine.updateGnss(fix)
+                            }
 
                             // The anchor still comes off the raw stream: it is a
                             // property of the receiver's first fix, not of
@@ -339,6 +359,7 @@ class MainActivity : AppCompatActivity() {
                             fusedCount++
                             latestFused = fused
                             track.addFusedPoint(fused)
+                            logger.logFused(fused, SystemClock.elapsedRealtimeNanos())
                         }
                     }
                     launch { tickDiagnostics() }

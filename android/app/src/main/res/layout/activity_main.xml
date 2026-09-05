@@ -51,6 +51,18 @@
             android:layout_gravity="bottom|end"
             android:layout_margin="12dp"
             android:text="@string/action_recentre" />
+
+        <!-- TEMPORARY: manual blackout injection for real-drive drift testing.
+             Remove once the injection point is validated / superseded by a
+             scripted trigger. -->
+        <Button
+            android:id="@+id/blackoutButton"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:layout_margin="12dp"
+            android:text="@string/action_start_blackout" />
     </FrameLayout>
 
     <LinearLayout
