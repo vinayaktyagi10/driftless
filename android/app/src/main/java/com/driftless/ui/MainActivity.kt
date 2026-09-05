@@ -59,6 +59,11 @@ class MainActivity : AppCompatActivity() {
 
     private var samplingJob: Job? = null
 
+    // TEMPORARY: manual blackout injection, see activity_main.xml. Withholds
+    // GNSS fixes from the engine while the raw fixes keep logging, so a real
+    // drive can produce a drift number without a real tunnel.
+    private var blackoutActive = false
+
     // Step-2 diagnostics. Written from collector coroutines on the main
     // dispatcher and read by the ticker, so no synchronisation is needed.
     private var imuCount = 0L
@@ -178,6 +183,14 @@ class MainActivity : AppCompatActivity() {
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        // TEMPORARY: manual blackout injection, see activity_main.xml.
+        binding.blackoutButton.setOnClickListener {
+            blackoutActive = !blackoutActive
+            logger.logBlackout(blackoutActive, SystemClock.elapsedRealtimeNanos())
+            binding.blackoutButton.setText(
+                if (blackoutActive) R.string.action_stop_blackout else R.string.action_start_blackout
+            )
+        }
         // TODO(step 5): draw the fused position instead of the raw fix, and
         // start feeding the dead-reckoning-only track alongside it.
     }
@@ -293,6 +306,13 @@ class MainActivity : AppCompatActivity() {
                 // log file always covers exactly the span that produced data.
                 val file = logger.start(settings.sensorDelay, settings.gnssIntervalMillis)
                 Log.i(DIAG_TAG, "logging to ${file?.absolutePath ?: "<unavailable>"}")
+                // TEMPORARY: manual blackout injection, see activity_main.xml.
+                // Stated at every open because the flag outlives the file it
+                // was set in: arming it before sampling drops the button's edge
+                // event on a null channel, and a STOP -> START opens a new file
+                // mid-blackout. Without this the log shows the drift with no
+                // marker explaining it, which reads as ordinary engine drift.
+                logger.logBlackout(blackoutActive, SystemClock.elapsedRealtimeNanos())
 
                 try {
                     launch {
@@ -312,7 +332,14 @@ class MainActivity : AppCompatActivity() {
                             latestFix = fix
                             lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
 
-                            engine.updateGnss(fix)
+                            // Withheld from the engine, not from the log — a
+                            // blackout is a test of what the engine does
+                            // without a fix, and the fix must survive
+                            // untouched as the ground truth to score that
+                            // against afterwards.
+                            if (!blackoutActive) {
+                                engine.updateGnss(fix)
+                            }
 
                             // The anchor still comes off the raw stream: it is a
                             // property of the receiver's first fix, not of
@@ -339,6 +366,7 @@ class MainActivity : AppCompatActivity() {
                             fusedCount++
                             latestFused = fused
                             track.addFusedPoint(fused)
+                            logger.logFused(fused, SystemClock.elapsedRealtimeNanos())
                         }
                     }
                     launch { tickDiagnostics() }
