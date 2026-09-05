@@ -25,7 +25,7 @@ function(driftless_add_test name)
     target_compile_definitions(${name} PRIVATE
         DRIFTLESS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
         DRIFTLESS_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../models")
-    gtest_discover_tests(${name})
+    gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60)
 endfunction()
 
 driftless_add_test(test_cholesky_update)
@@ -39,6 +39,7 @@ driftless_add_test(test_osm_reader)
 driftless_add_test(test_drift_characterization)
 driftless_add_test(test_blackout_scenario)
 
+driftless_add_test(test_realtime_budget)
 driftless_add_test(test_imu_derived)
 driftless_add_test(test_model_window)
 driftless_add_test(test_velocity_model)

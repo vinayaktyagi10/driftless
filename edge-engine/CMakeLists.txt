@@ -31,29 +31,61 @@ endif()
 # vendored-or-fetched convention as Eigen above: drop a copy under
 # third_party/onnxruntime/{include,lib} yourself (gitignored) to skip the
 # download, or let this pull the official Linux x64 release tarball.
+# --- ONNX Runtime (C++ API) -------------------------------------------------
+# --- ONNX Runtime (C++ API) -------------------------------------------------
 set(DRIFTLESS_ORT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime)
 set(DRIFTLESS_ORT_VERSION 1.19.2)
+
+if(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+        set(DRIFTLESS_ORT_PLATFORM "osx-arm64")
+    else()
+        set(DRIFTLESS_ORT_PLATFORM "osx-x86_64")
+    endif()
+    set(DRIFTLESS_ORT_LIB_NAME "libonnxruntime.dylib")
+elseif(UNIX)
+    set(DRIFTLESS_ORT_PLATFORM "linux-x64")
+    set(DRIFTLESS_ORT_LIB_NAME "libonnxruntime.so")
+else()
+    message(FATAL_ERROR "driftless: no ONNX Runtime download configured for this platform -- "
+                         "vendor it manually under third_party/onnxruntime")
+endif()
 
 if(EXISTS ${DRIFTLESS_ORT_DIR}/include/onnxruntime_cxx_api.h)
     message(STATUS "driftless: using vendored ONNX Runtime at ${DRIFTLESS_ORT_DIR}")
 else()
     set(DRIFTLESS_ORT_URL
-        "https://github.com/microsoft/onnxruntime/releases/download/v${DRIFTLESS_ORT_VERSION}/onnxruntime-linux-x64-${DRIFTLESS_ORT_VERSION}.tgz")
+        "https://github.com/microsoft/onnxruntime/releases/download/v${DRIFTLESS_ORT_VERSION}/onnxruntime-${DRIFTLESS_ORT_PLATFORM}-${DRIFTLESS_ORT_VERSION}.tgz")
     set(DRIFTLESS_ORT_ARCHIVE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime.tgz)
-    message(STATUS "driftless: downloading ONNX Runtime ${DRIFTLESS_ORT_VERSION} (one-time)")
+    message(STATUS "driftless: downloading ONNX Runtime ${DRIFTLESS_ORT_VERSION} for ${DRIFTLESS_ORT_PLATFORM}")
     file(DOWNLOAD ${DRIFTLESS_ORT_URL} ${DRIFTLESS_ORT_ARCHIVE} SHOW_PROGRESS)
     file(MAKE_DIRECTORY ${DRIFTLESS_ORT_DIR})
     file(ARCHIVE_EXTRACT INPUT ${DRIFTLESS_ORT_ARCHIVE}
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_extracted)
     file(GLOB DRIFTLESS_ORT_EXTRACTED
-         ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_extracted/onnxruntime-linux-x64-*)
+         ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_extracted/onnxruntime-${DRIFTLESS_ORT_PLATFORM}-*)
     file(COPY ${DRIFTLESS_ORT_EXTRACTED}/include DESTINATION ${DRIFTLESS_ORT_DIR})
     file(COPY ${DRIFTLESS_ORT_EXTRACTED}/lib DESTINATION ${DRIFTLESS_ORT_DIR})
 endif()
 
+# macOS quarantines anything downloaded via file(DOWNLOAD ...); the first
+# process to load a quarantined dylib blocks on a Gatekeeper check long
+# enough to blow gtest_discover_tests' timeout. Clear it every configure.
+if(APPLE)
+    execute_process(COMMAND xattr -cr ${DRIFTLESS_ORT_DIR} ERROR_QUIET)
+endif()
+
+find_file(DRIFTLESS_ORT_LIB_PATH ${DRIFTLESS_ORT_LIB_NAME}
+    PATHS ${DRIFTLESS_ORT_DIR}/lib NO_DEFAULT_PATH)
+if(NOT DRIFTLESS_ORT_LIB_PATH)
+    message(FATAL_ERROR "driftless: expected ${DRIFTLESS_ORT_LIB_NAME} under "
+                         "${DRIFTLESS_ORT_DIR}/lib but didn't find it -- run "
+                         "`ls ${DRIFTLESS_ORT_DIR}/lib` and check what actually landed there.")
+endif()
+
 add_library(driftless_onnxruntime SHARED IMPORTED)
 set_target_properties(driftless_onnxruntime PROPERTIES
-    IMPORTED_LOCATION ${DRIFTLESS_ORT_DIR}/lib/libonnxruntime.so
+    IMPORTED_LOCATION ${DRIFTLESS_ORT_LIB_PATH}
     INTERFACE_INCLUDE_DIRECTORIES ${DRIFTLESS_ORT_DIR}/include)
 
 # --- The engine ------------------------------------------------------------
