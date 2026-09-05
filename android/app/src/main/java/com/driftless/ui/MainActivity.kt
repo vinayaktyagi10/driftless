@@ -306,6 +306,13 @@ class MainActivity : AppCompatActivity() {
                 // log file always covers exactly the span that produced data.
                 val file = logger.start(settings.sensorDelay, settings.gnssIntervalMillis)
                 Log.i(DIAG_TAG, "logging to ${file?.absolutePath ?: "<unavailable>"}")
+                // TEMPORARY: manual blackout injection, see activity_main.xml.
+                // Stated at every open because the flag outlives the file it
+                // was set in: arming it before sampling drops the button's edge
+                // event on a null channel, and a STOP -> START opens a new file
+                // mid-blackout. Without this the log shows the drift with no
+                // marker explaining it, which reads as ordinary engine drift.
+                logger.logBlackout(blackoutActive, SystemClock.elapsedRealtimeNanos())
 
                 try {
                     launch {
