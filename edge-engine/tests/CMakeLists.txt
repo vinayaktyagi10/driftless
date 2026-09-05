@@ -14,8 +14,6 @@ endif()
 
 include(GoogleTest)
 
-# Trajectory generation shared by the dynamics tests. Deliberately independent
-# of the engine's own mechanization -- see trajectory_sim.h for why.
 add_library(driftless_test_support support/trajectory_sim.cpp)
 target_include_directories(driftless_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(driftless_test_support PUBLIC driftless_edge)
@@ -25,7 +23,8 @@ function(driftless_add_test name)
     target_link_libraries(${name} PRIVATE driftless_edge driftless_test_support GTest::gtest_main)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
     target_compile_definitions(${name} PRIVATE
-        DRIFTLESS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+        DRIFTLESS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+        DRIFTLESS_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../models")
     gtest_discover_tests(${name})
 endfunction()
 
@@ -39,3 +38,7 @@ driftless_add_test(test_map_matching)
 driftless_add_test(test_osm_reader)
 driftless_add_test(test_drift_characterization)
 driftless_add_test(test_blackout_scenario)
+
+driftless_add_test(test_imu_derived)
+driftless_add_test(test_model_window)
+driftless_add_test(test_velocity_model)
