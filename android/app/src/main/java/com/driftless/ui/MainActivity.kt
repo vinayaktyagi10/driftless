@@ -553,7 +553,7 @@ class MainActivity : AppCompatActivity() {
         appendLine(
             String.format(
                 Locale.US,
-                "  updates: GNSS=%d/%d NHC=%d TFLite=%d Map=%d",
+                "  updates: GNSS applied=%d (rej=%d)  NHC=%d  TFLite=%d  Map=%d",
                 diag.gnssApplied,
                 diag.gnssRejected,
                 diag.nhcApplied,

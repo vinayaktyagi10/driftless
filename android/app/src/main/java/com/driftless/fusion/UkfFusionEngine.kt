@@ -123,6 +123,7 @@ class UkfFusionEngine(
 
     private var isOrientationInitialized = false
     private var consecutiveGnssRejections = 0
+    private var lastGnssAppliedNanos = 0L
 
     init {
         computeWeights()
@@ -300,6 +301,7 @@ class UkfFusionEngine(
         if (outcome == UpdateOutcome.Applied) {
             diagnostics.gnssApplied++
             consecutiveGnssRejections = 0
+            lastGnssAppliedNanos = fix.timestampNanos
         } else if (outcome == UpdateOutcome.RejectedByGate) {
             diagnostics.gnssRejected++
             consecutiveGnssRejections++
@@ -328,6 +330,7 @@ class UkfFusionEngine(
                 consecutiveGnssRejections = 0
                 outcome = UpdateOutcome.Applied
                 diagnostics.gnssApplied++
+                lastGnssAppliedNanos = fix.timestampNanos
             }
         }
 
@@ -610,11 +613,21 @@ class UkfFusionEngine(
             ((Math.toDegrees(atan2(forwardNed.y, forwardNed.x)) + 360.0) % 360.0).toFloat()
         }
 
-        // Covariance-based confidence metric (0..1)
-        val s = sqrtCovariance
-        val horizVar = s[0, 0] * s[0, 0] + s[0, 1] * s[0, 1] + s[1, 0] * s[1, 0] + s[1, 1] * s[1, 1]
-        val sigmaH = sqrt(max(horizVar, 0.01))
-        val confidence = (1.0 / (1.0 + sigmaH / 10.0)).toFloat().coerceIn(0.05f, 1.0f)
+        // Confidence metric:
+        // Holds at 1.0f while active GNSS fixes are arriving (<= 2 seconds ago),
+        // and decays across 60 seconds of blackout/coasting.
+        // This directs TrackRenderer to draw the aided track in blue during lock,
+        // and the dead-reckoned track in orange during outage/coasting.
+        val confidence = if (lastGnssAppliedNanos == 0L) {
+            1.0f
+        } else {
+            val elapsedSinceGnssSec = (nowNanos - lastGnssAppliedNanos) / NANOS_PER_SECOND
+            if (elapsedSinceGnssSec <= 2.0) {
+                1.0f
+            } else {
+                (1.0 - (elapsedSinceGnssSec - 2.0) / 58.0).coerceIn(0.05, 0.95).toFloat()
+            }
+        }
 
         val fused = FusedPosition(
             lat = geodetic.latDeg,
