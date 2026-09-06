@@ -43,14 +43,44 @@
             android:textSize="12sp"
             android:visibility="gone" />
 
-        <Button
-            android:id="@+id/recentreButton"
-            style="?android:attr/buttonStyleSmall"
+        <!-- Blackout Simulation Banner -->
+        <TextView
+            android:id="@+id/blackoutBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#E6D97706"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:fontFamily="monospace"
+            android:textSize="13sp"
+            android:gravity="center"
+            android:visibility="gone" />
+
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|end"
             android:layout_margin="12dp"
-            android:text="@string/action_recentre" />
+            android:orientation="vertical"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/blackoutButton"
+                style="?android:attr/buttonStyleSmall"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="@string/action_blackout_start" />
+
+            <Button
+                android:id="@+id/recentreButton"
+                style="?android:attr/buttonStyleSmall"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/action_recentre" />
+        </LinearLayout>
     </FrameLayout>
 
     <LinearLayout

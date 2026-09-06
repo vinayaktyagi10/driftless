@@ -5,13 +5,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
-import android.view.WindowManager
-import android.location.LocationManager
 import android.provider.Settings
 import android.util.Log
+import android.view.View
+import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -23,8 +24,14 @@ import com.driftless.R
 import com.driftless.databinding.ActivityMainBinding
 import com.driftless.fusion.FusedPosition
 import com.driftless.fusion.GnssFix
-import com.driftless.fusion.StubFusionEngine
+import com.driftless.fusion.ImuNoiseParams
+import com.driftless.fusion.UkfFusionEngine
+import com.driftless.fusion.Vec3
+import com.driftless.fusion.VelocityModel
 import com.driftless.logging.TrackLogger
+import com.driftless.mapmatch.HmmMapMatcher
+import com.driftless.mapmatch.OsmReader
+import com.driftless.mapmatch.RoadGraph
 import com.driftless.sensors.GnssSampler
 import com.driftless.sensors.ImuFrame
 import com.driftless.sensors.ImuSampler
@@ -38,14 +45,18 @@ import org.osmdroid.events.MapListener
 import org.osmdroid.events.ScrollEvent
 import org.osmdroid.events.ZoomEvent
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.hypot
+import kotlin.math.max
 
 /**
- * Wires sensors -> fusion -> map-match -> map view. Owns the GNSS
- * deficit handler: switches the displayed position source between
- * GNSS-aided and dead-reckoning-only without a visible jump.
+ * Wires sensors -> UKF fusion engine -> TFLite velocity model -> HMM map matcher -> map view.
  *
- * Step 1 of the build order covers only the permission gate and the sensor
- * inventory below; the samplers, engine and map arrive in steps 2-5.
+ * Implements the full Role 02 Position Fusion Pipeline:
+ * - 15-state Error-State Square-Root UKF with SO(3) Lie algebra kinematics.
+ * - TFLite 14-channel Learned Forward Velocity Model.
+ * - Newson & Krumm HMM Map Matcher against offline OSM road graph.
+ * - Live GPS Outage / Blackout Simulation Mode with live drift characterization.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -53,14 +64,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: AppSettings
     private lateinit var imuSampler: ImuSampler
     private lateinit var gnssSampler: GnssSampler
-    private lateinit var engine: StubFusionEngine
+    private lateinit var engine: UkfFusionEngine
+    private lateinit var velocityModel: VelocityModel
+    private var roadGraph: RoadGraph? = null
+    private var hmmMatcher: HmmMapMatcher? = null
     private lateinit var track: TrackRenderer
     private lateinit var logger: TrackLogger
 
     private var samplingJob: Job? = null
 
-    // Step-2 diagnostics. Written from collector coroutines on the main
-    // dispatcher and read by the ticker, so no synchronisation is needed.
+    // Live diagnostics
     private var imuCount = 0L
     private var imuCountAtLastTick = 0L
     private var lastTickNanos = 0L
@@ -72,39 +85,27 @@ class MainActivity : AppCompatActivity() {
     private var anchorLogged = false
     private var lastFixRealtimeNanos = 0L
 
-    // Step-5 diagnostics: the engine's output, so the readout shows what the
-    // map is actually drawing rather than only what the receiver reported.
+    // Filter output
     private var fusedCount = 0L
     private var latestFused: FusedPosition? = null
 
-    /**
-     * The four states that actually need different UI. Android collapses
-     * "never asked" and "permanently denied" into the same API answers, so
-     * [AppSettings.hasRequestedLocation] is what separates them.
-     */
+    // Blackout simulation state
+    private var isSimulatedBlackout = false
+    private var blackoutStartNanos = 0L
+    private var blackoutDistanceM = 0.0
+    private var lastBlackoutFusedNanos = 0L
+
     private enum class LocationAccess {
         Granted,
-        /**
-         * Permission held, but Location is off for the whole device. Android
-         * reports this as a fully granted permission and then silently never
-         * delivers a fix, which is the most misleading state of the five.
-         */
         ServicesOff,
-        /** Android 12+ lets the user grant approximate location only. */
         CoarseOnly,
-        /** Not yet asked, or asked and dismissed — the prompt will still show. */
         Askable,
-        /** Prompt will no longer show. Only app settings can fix this. */
         PermanentlyDenied,
     }
 
     private val requestPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        // The result map is deliberately ignored: it reports what this one
-        // dialog returned, whereas render() asks the system what the app
-        // actually holds right now. Those differ if the user changed the
-        // setting in another screen, and the system is the honest source.
         settings.hasRequestedLocation = true
         render()
     }
@@ -112,13 +113,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // A split log file has two very different causes -- a lifecycle
-        // STOP/START, or a full activity recreation -- and they need different
-        // fixes. `dumpsys usagestats` records the first for days after the
-        // fact, but it is blind to the second: its instanceId tracks the
-        // ActivityRecord, which survives recreation. This line supplies the
-        // half the platform does not, and is the whole difference between
-        // diagnosing a split run live and inferring it wrongly afterwards.
         Log.i(
             DIAG_TAG,
             "onCreate activity=${System.identityHashCode(this)} " +
@@ -128,31 +122,24 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Sampling is scoped to repeatOnLifecycle(STARTED), which is correct --
-        // a 500 Hz IMU must not keep running behind a locked screen. The
-        // consequence is that a screen timeout silently ends a road test
-        // partway through, with a track that just stops. A window flag rather
-        // than a wake lock: it needs no permission and cannot outlive the
-        // activity, so there is nothing to leak if the app is killed.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         settings = AppSettings(this)
         imuSampler = ImuSampler(this)
         gnssSampler = GnssSampler(this)
 
-        // A provider, not a value. GnssSampler does not build the local-tangent
-        // frame until the first fix lands, so passing `gnssSampler.frame` here
-        // would hand the engine a null it could never replace, and the map would
-        // stay empty for the whole run with nothing on screen to say why.
-        engine = StubFusionEngine { gnssSampler.frame }
+        // Instantiate UKF Position Fusion Engine with consumer MEMS IMU parameters
+        engine = UkfFusionEngine(
+            noise = ImuNoiseParams.consumerMems(),
+            frameProvider = { gnssSampler.frame }
+        )
+
+        // Instantiate TFLite Learned Velocity Model
+        velocityModel = VelocityModel(this)
 
         track = TrackRenderer(binding.mapView)
         logger = TrackLogger(this, lifecycleScope)
 
-        // Any manual pan or zoom hands control to the user and stops the map
-        // chasing the marker. Wrapped in DelayedMapListener because a single
-        // fling fires scroll events continuously, and reacting to each one
-        // would repaint the overlays dozens of times per gesture.
         binding.mapView.addMapListener(
             DelayedMapListener(
                 object : MapListener {
@@ -167,10 +154,6 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        // The readout is a development instrument, not part of the demo. It
-        // covers roughly a third of the map, which is the part judges are
-        // actually looking at, so it collapses on tap rather than being either
-        // permanently in the way or unavailable when something looks wrong.
         binding.diagnosticsText.setOnClickListener { diagnosticsExpanded = false; renderDiagnostics() }
         binding.diagnosticsBadge.setOnClickListener { diagnosticsExpanded = true; renderDiagnostics() }
 
@@ -178,19 +161,26 @@ class MainActivity : AppCompatActivity() {
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-        // TODO(step 5): draw the fused position instead of the raw fix, and
-        // start feeding the dead-reckoning-only track alongside it.
+
+        binding.blackoutButton.setOnClickListener {
+            isSimulatedBlackout = !isSimulatedBlackout
+            if (isSimulatedBlackout) {
+                blackoutStartNanos = SystemClock.elapsedRealtimeNanos()
+                blackoutDistanceM = 0.0
+                lastBlackoutFusedNanos = blackoutStartNanos
+                binding.blackoutButton.text = getString(R.string.action_blackout_stop)
+                binding.blackoutBanner.visibility = View.VISIBLE
+                updateBlackoutBanner()
+            } else {
+                binding.blackoutButton.text = getString(R.string.action_blackout_start)
+                binding.blackoutBanner.visibility = View.GONE
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        // MapView runs its own tile-fetch threads and does not observe the
-        // activity lifecycle on its own. Without this pair they outlive the
-        // activity, which over a half-hour drive test is a real leak.
         binding.mapView.onResume()
-        // Re-checked on every resume rather than only in onCreate, because the
-        // user can revoke or grant the permission in system settings while the
-        // activity is merely stopped, and Android does not restart us for it.
         render()
     }
 
@@ -199,15 +189,16 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    override fun onDestroy() {
+        velocityModel.close()
+        super.onDestroy()
+    }
+
     private fun locationAccess(): LocationAccess {
         val fine = ContextCompat.checkSelfPermission(
             this, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
         if (fine) {
-            // Checked here rather than trusted: a granted permission says only
-            // that this app may use location, not that the device will produce
-            // any. With the master switch off the samplers run, the UI reports
-            // "sensors ready", and no fix ever arrives.
             val manager = getSystemService(LOCATION_SERVICE) as LocationManager
             return if (LocationManagerCompat.isLocationEnabled(manager)) {
                 LocationAccess.Granted
@@ -237,14 +228,11 @@ class MainActivity : AppCompatActivity() {
         when (locationAccess()) {
             LocationAccess.Granted -> {
                 binding.statusText.setText(R.string.perm_status_granted)
-                binding.actionButton.visibility = android.view.View.GONE
+                binding.actionButton.visibility = View.GONE
                 startSampling()
             }
 
             LocationAccess.ServicesOff -> {
-                // The IMU is still worth running — dead reckoning is the whole
-                // point and it needs no fix — so sampling starts anyway and the
-                // banner explains why the GNSS half of the readout stays empty.
                 binding.statusText.setText(R.string.perm_status_services_off)
                 showAction(R.string.action_open_location_settings) {
                     startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
@@ -253,10 +241,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             LocationAccess.CoarseOnly -> {
-                // Not treated as a soft success. Approximate location is
-                // kilometre-scale, and the whole point of the app is metre-scale
-                // drift, so proceeding on it would produce a demo that looks
-                // like it works and is meaningless.
                 binding.statusText.setText(R.string.perm_status_coarse_only)
                 showAction(R.string.action_open_settings) { openAppSettings() }
             }
@@ -277,87 +261,158 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Starts the sampler collectors. Idempotent — [render] runs on every resume
-     * and would otherwise stack a second set of collectors on the sensors.
-     *
-     * `repeatOnLifecycle(STARTED)` is what actually releases the sensors and
-     * the GNSS request when the app is backgrounded; without it the IMU keeps
-     * running at 200 Hz behind a locked screen.
+     * Starts the sensor collectors and fusion pipelines.
      */
     private fun startSampling() {
         if (samplingJob?.isActive == true) return
 
         samplingJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                // Tied to the sampling lifecycle rather than to onCreate, so a
-                // log file always covers exactly the span that produced data.
                 val file = logger.start(settings.sensorDelay, settings.gnssIntervalMillis)
                 Log.i(DIAG_TAG, "logging to ${file?.absolutePath ?: "<unavailable>"}")
 
                 try {
+                    // 1. IMU Propagation Loop (200 - 500 Hz)
                     launch {
                         imuSampler.frames(settings.sensorDelay).collect { frame ->
                             imuCount++
                             latestFrame = frame
-                            // Drives the engine's coast clock. The stub reads
-                            // only the timestamp; the real engine will
-                            // integrate the same sample.
-                            engine.predict(frame.toImuSample())
+
+                            val sample = frame.toImuSample()
+                            engine.predict(sample)
+
+                            // Feed sample to TFLite Velocity Model context window
+                            val hz = if (measuredHz > 10.0) measuredHz else 200.0
+                            val dtSec = 1.0 / hz
+                            velocityModel.addSample(
+                                accel = Vec3(sample.accel[0].toDouble(), sample.accel[1].toDouble(), sample.accel[2].toDouble()),
+                                gyro = Vec3(sample.gyro[0].toDouble(), sample.gyro[1].toDouble(), sample.gyro[2].toDouble()),
+                                gravity = frame.gravity?.let { Vec3(it[0].toDouble(), it[1].toDouble(), it[2].toDouble()) },
+                                dtSeconds = dtSec,
+                            )
+
                             logger.logImu(frame)
                         }
                     }
+
+                    // 2. GNSS Correction Loop (1 - 5 Hz)
                     launch {
                         gnssSampler.fixes(settings.gnssIntervalMillis).collect { fix ->
                             gnssCount++
                             latestFix = fix
                             lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
 
-                            engine.updateGnss(fix)
+                            // Pass fix to filter only if not in simulated blackout mode
+                            if (!isSimulatedBlackout) {
+                                engine.updateGnss(fix)
+                            }
 
-                            // The anchor still comes off the raw stream: it is a
-                            // property of the receiver's first fix, not of
-                            // anything the engine computes.
-                            gnssSampler.frame?.let { frame ->
+                            // Initialize Road Graph if tangent frame is established
+                            val frame = gnssSampler.frame
+                            if (frame != null) {
                                 if (!anchorLogged) {
                                     logger.logAnchor(frame)
                                     anchorLogged = true
                                 }
+                                if (roadGraph == null) {
+                                    try {
+                                        val xml = assets.open("maps/grid.osm").bufferedReader().use { it.readText() }
+                                        val osmNetwork = OsmReader.loadOsmXml(xml, frame)
+                                        val graph = osmNetwork.graph
+                                        roadGraph = graph
+                                        hmmMatcher = HmmMapMatcher(graph)
+                                        Log.i(DIAG_TAG, "Initialized OSM RoadGraph with ${graph.segmentCount} segments")
+                                    } catch (e: Exception) {
+                                        Log.w(DIAG_TAG, "No bundled map loaded: ${e.message}")
+                                    }
+                                }
                             }
-                            // Raw fixes stay in the log even though the map now
-                            // draws fused output. Without them the log cannot
-                            // answer "was the filter right", which is the only
-                            // question a recorded run exists to answer.
+
                             logger.logFix(fix)
                         }
                     }
+
+                    // 3. TFLite Velocity Model & NHC Aiding Loop (10 Hz)
                     launch {
-                        // The map's only source since step 5. It never sees a
-                        // raw fix, so anything visibly wrong on screen is the
-                        // engine's, which is what makes the drive test
-                        // diagnostic rather than merely pretty.
+                        while (true) {
+                            try {
+                                delay(100)
+                                if (velocityModel.isReady) {
+                                    val pred = velocityModel.predict()
+                                    if (pred != null) {
+                                        engine.updateVelocityModel(pred.speedMps.toDouble())
+                                    }
+                                }
+                                engine.updateNonHolonomic()
+                            } catch (e: Exception) {
+                                Log.w(DIAG_TAG, "Aiding loop tick error: ${e.message}")
+                            }
+                        }
+                    }
+
+                    // 4. Fused State & Map Rendering Loop (10 Hz)
+                    launch {
                         engine.observePosition().collect { fused ->
                             fusedCount++
                             latestFused = fused
+
+                            // HMM Map Matching update
+                            val matcher = hmmMatcher
+                            if (matcher != null) {
+                                val state = engine.state()
+                                val match = matcher.step(state.position)
+                                if (match.matched) {
+                                    engine.updateMapMatch(match)
+                                }
+                            }
+
                             track.addFusedPoint(fused)
+
+                            // Accumulate blackout dead-reckoning metrics
+                            if (isSimulatedBlackout) {
+                                val now = SystemClock.elapsedRealtimeNanos()
+                                val dtSec = if (lastBlackoutFusedNanos > 0L) (now - lastBlackoutFusedNanos) / 1e9 else 0.0
+                                lastBlackoutFusedNanos = now
+                                val speed = fused.speedMetersPerSec
+                                if (speed > 0.1f && dtSec in 0.0..1.0) {
+                                    blackoutDistanceM += speed * dtSec
+                                }
+                                updateBlackoutBanner()
+                            }
                         }
                     }
+
+                    // 5. Diagnostics UI Ticker (2 Hz)
                     launch { tickDiagnostics() }
                     awaitCancellation()
                 } finally {
-                    // Reached when the lifecycle drops below STARTED, which is
-                    // also when the samplers are released. Closing here is what
-                    // flushes the tail of the file.
                     logger.stop()
                 }
             }
         }
     }
 
-    /**
-     * Repaints the readout twice a second. The IMU is sampled far faster than
-     * a display can show, and rendering per sample would make the UI thread the
-     * bottleneck that causes the dropped samples it is meant to reveal.
-     */
+    private fun updateBlackoutBanner() {
+        if (!isSimulatedBlackout) return
+        val blackoutSec = (SystemClock.elapsedRealtimeNanos() - blackoutStartNanos) / 1e9
+        val s = engine.covarianceSqrt()
+        val horizVar = s[0, 0] * s[0, 0] + s[0, 1] * s[0, 1] + s[1, 0] * s[1, 0] + s[1, 1] * s[1, 1]
+        val sigmaH = kotlin.math.sqrt(max(horizVar, 0.01))
+        val driftEstimateM = 2.0 * sigmaH
+        val driftPct = if (blackoutDistanceM > 5.0) {
+            (driftEstimateM / blackoutDistanceM) * 100.0
+        } else {
+            0.0
+        }
+        binding.blackoutBanner.text = String.format(
+            Locale.US,
+            getString(R.string.blackout_banner_fmt),
+            blackoutSec,
+            blackoutDistanceM,
+            driftPct,
+        )
+    }
+
     private suspend fun tickDiagnostics() {
         lastTickNanos = System.nanoTime()
         while (true) {
@@ -374,25 +429,22 @@ class MainActivity : AppCompatActivity() {
             val text = diagnosticsText()
             binding.diagnosticsText.text = text
             renderDiagnostics()
-            // Mirrored to logcat so the readout can be verified over adb without
-            // depending on a screenshot — the phone blanks its display for
-            // reasons that have nothing to do with this app.
+            if (isSimulatedBlackout) {
+                updateBlackoutBanner()
+            }
             Log.d(DIAG_TAG, text.replace('\n', '|'))
         }
     }
 
-    /** Shows either the full readout or a one-line badge, never both. */
     private fun renderDiagnostics() {
         binding.diagnosticsText.visibility =
-            if (diagnosticsExpanded) android.view.View.VISIBLE else android.view.View.GONE
+            if (diagnosticsExpanded) View.VISIBLE else View.GONE
         binding.diagnosticsBadge.visibility =
-            if (diagnosticsExpanded) android.view.View.GONE else android.view.View.VISIBLE
-        // Fix age, not just sigma. A receiver that has stopped reporting keeps
-        // its last sigma_h on screen forever and looks healthy, which is exactly
-        // the failure the drive test is meant to find. Age is the only field
-        // here that moves when GNSS dies.
-        binding.diagnosticsBadge.text = getString(
-            R.string.diagnostics_badge_fmt,
+            if (diagnosticsExpanded) View.GONE else View.VISIBLE
+
+        binding.diagnosticsBadge.text = String.format(
+            Locale.US,
+            getString(R.string.diagnostics_badge_fmt),
             measuredHz.toInt(),
             gnssSampler.satellitesUsed,
             latestFix?.horizontalAccuracyM ?: Double.NaN,
@@ -400,14 +452,13 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** Seconds since the last fix, or -1 before the first one arrives. */
     private fun fixAgeSeconds(): Double =
         if (lastFixRealtimeNanos == 0L) -1.0
         else (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9
 
     private fun diagnosticsText(): String = buildString {
         val f = latestFrame
-        appendLine("IMU   ${"%.0f".format(Locale.US, measuredHz)} Hz   n=$imuCount")
+        appendLine("IMU   ${String.format(Locale.US, "%.0f", measuredHz)} Hz   n=$imuCount")
         appendLine("      dropped=${imuSampler.droppedSamples.get()}")
         if (f == null) {
             appendLine("      waiting for accel+gyro…")
@@ -422,8 +473,14 @@ class MainActivity : AppCompatActivity() {
 
         val fix = latestFix
         appendLine(
-            "GNSS  n=$gnssCount   sats=${gnssSampler.satellitesUsed}   age=%.1fs"
-                .format(Locale.US, fixAgeSeconds())
+            String.format(
+                Locale.US,
+                "GNSS  n=%d   sats=%d   age=%.1fs%s",
+                gnssCount,
+                gnssSampler.satellitesUsed,
+                fixAgeSeconds(),
+                if (isSimulatedBlackout) " [BLACKOUT SIMULATION]" else ""
+            )
         )
         appendLine("      log dropped=${logger.droppedRecords.get()}")
         if (fix == null) {
@@ -431,70 +488,117 @@ class MainActivity : AppCompatActivity() {
         } else {
             val p = fix.position
             appendLine(
-                "  NED  N=%.1f E=%.1f D=%.1f m".format(
-                    Locale.US, p.north, p.east, p.down,
-                )
+                String.format(Locale.US, "  NED  N=%.1f E=%.1f D=%.1f m", p.north, p.east, p.down)
             )
             appendLine(
-                "  sigma_h=%.2f m  sigma_v=%.2f m".format(
-                    Locale.US, fix.horizontalAccuracyM, fix.verticalAccuracyM,
+                String.format(
+                    Locale.US,
+                    "  sigma_h=%.2f m  sigma_v=%.2f m",
+                    fix.horizontalAccuracyM,
+                    fix.verticalAccuracyM,
                 )
             )
             appendLine(
                 if (fix.hasVelocity) {
-                    "  vel  N=%.2f E=%.2f m/s  sigma=%.2f".format(
+                    String.format(
                         Locale.US,
-                        fix.velocityNed.x, fix.velocityNed.y, fix.speedAccuracyMps,
+                        "  vel  N=%.2f E=%.2f m/s  sigma=%.2f",
+                        fix.velocityNed.x,
+                        fix.velocityNed.y,
+                        fix.speedAccuracyMps,
                     )
                 } else {
                     "  vel  none (standstill or no doppler)"
                 }
             )
-            appendLine("  t_mono     ${fix.timestampNanos}")
-
-            // The check that matters most and is invisible in any single value:
-            // both clocks must be the same base. A large gap here means one of
-            // them is UTC epoch and the filter is about to be handed a
-            // nonsensical dt.
-            if (f != null) {
-                val skewMs = (f.timestampNanos - fix.timestampNanos) / 1e6
-                appendLine("  clock skew IMU-GNSS  %.0f ms".format(Locale.US, skewMs))
-            }
         }
         gnssSampler.frame?.let {
             appendLine(
-                "  anchor %.6f, %.6f".format(Locale.US, it.originLatDeg, it.originLonDeg)
+                String.format(Locale.US, "  anchor %.6f, %.6f", it.originLatDeg, it.originLonDeg)
             )
         }
         appendLine()
 
-        // What the map is drawing, which after step 5 is no longer the same
-        // thing as the newest fix. Confidence is the field to watch on a drive
-        // test: it leaves 1.00 exactly when the engine stops being corrected
-        // and starts coasting, so it says whether the orange track on screen is
-        // a real outage or a rendering artefact.
+        // UKF Filter Diagnostics & Biases
+        val diag = engine.diagnostics
+        val state = engine.state()
+        val s = engine.covarianceSqrt()
+        val horizVar = s[0, 0] * s[0, 0] + s[0, 1] * s[0, 1] + s[1, 0] * s[1, 0] + s[1, 1] * s[1, 1]
+        val vertVar = s[2, 2] * s[2, 2]
+        val filterSigmaH = kotlin.math.sqrt(max(horizVar, 0.0001))
+        val filterSigmaV = kotlin.math.sqrt(max(vertVar, 0.0001))
+
+        appendLine("UKF 15-STATE SR-UKF")
+        appendLine(
+            String.format(
+                Locale.US,
+                "  updates: GNSS=%d/%d NHC=%d TFLite=%d Map=%d",
+                diag.gnssApplied,
+                diag.gnssRejected,
+                diag.nhcApplied,
+                diag.velocityModelApplied,
+                diag.mapMatchApplied,
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.US,
+                "  bias_a=[%+.3f, %+.3f, %+.3f] m/s^2",
+                state.accelBias.x,
+                state.accelBias.y,
+                state.accelBias.z,
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.US,
+                "  bias_g=[%+.4f, %+.4f, %+.4f] deg/s",
+                Math.toDegrees(state.gyroBias.x),
+                Math.toDegrees(state.gyroBias.y),
+                Math.toDegrees(state.gyroBias.z),
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.US,
+                "  uncert: sigma_h=%.2f m  sigma_v=%.2f m",
+                filterSigmaH,
+                filterSigmaV,
+            )
+        )
+        appendLine()
+
         val fused = latestFused
-        appendLine("FUSED n=$fusedCount")
+        appendLine("FUSED OUTPUT n=$fusedCount")
         if (fused == null) {
             appendLine("      waiting for engine output…")
         } else {
             appendLine(
-                "  %.6f, %.6f".format(Locale.US, fused.lat, fused.lon)
+                String.format(Locale.US, "  pos  %.6f, %.6f", fused.lat, fused.lon)
             )
             appendLine(
-                "  hdg=%.0f deg  speed=%.1f m/s (%.0f km/h)".format(
+                String.format(
                     Locale.US,
+                    "  hdg=%.0f deg  speed=%.2f m/s (%.1f km/h)",
                     fused.headingDegrees,
                     fused.speedMetersPerSec,
                     fused.speedMetersPerSec * 3.6f,
                 )
             )
+            val isGnssActive = !isSimulatedBlackout && latestFix != null && fixAgeSeconds() in 0.0..3.0
             appendLine(
-                if (fused.confidence >= 1f) {
-                    "  conf=1.00  AIDED"
+                if (isGnssActive) {
+                    String.format(
+                        Locale.US,
+                        "  mode=GNSS (conf=%.2f)",
+                        fused.confidence,
+                    )
                 } else {
-                    "  conf=%.2f  COASTING %.1fs".format(
-                        Locale.US, fused.confidence, fixAgeSeconds(),
+                    String.format(
+                        Locale.US,
+                        "  mode=DEAD_RECKONING (conf=%.2f, outage=%.1fs)",
+                        fused.confidence,
+                        if (isSimulatedBlackout) (SystemClock.elapsedRealtimeNanos() - blackoutStartNanos) / 1e9 else fixAgeSeconds(),
                     )
                 }
             )
@@ -503,25 +607,19 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val DIAG_TAG = "DriftlessDiag"
-
-        /** Coalesces the scroll events a single fling produces. */
         const val MAP_GESTURE_DEBOUNCE_MS = 200L
     }
 
     private fun vec(v: FloatArray) =
-        "[%+7.3f %+7.3f %+7.3f]".format(Locale.US, v[0], v[1], v[2])
+        String.format(Locale.US, "[%+7.3f %+7.3f %+7.3f]", v[0], v[1], v[2])
 
     private fun showAction(labelRes: Int, onClick: () -> Unit) {
-        binding.actionButton.visibility = android.view.View.VISIBLE
+        binding.actionButton.visibility = View.VISIBLE
         binding.actionButton.setText(labelRes)
         binding.actionButton.setOnClickListener { onClick() }
     }
 
     private fun requestLocation() {
-        // Both are requested together on purpose: asking for FINE alone still
-        // shows the user a Precise/Approximate choice on Android 12+, and
-        // omitting COARSE means an approximate grant leaves the app with
-        // nothing at all rather than with something we can report.
         requestPermissions.launch(
             arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -539,12 +637,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /**
-     * Reports which inertial sensors this handset actually has. The manifest
-     * marks all of them `required="false"` so the app installs anywhere, which
-     * makes this the only place a missing gyroscope becomes visible before the
-     * fusion engine quietly produces nonsense from it.
-     */
     private fun renderSensorInventory() {
         val manager = getSystemService(SENSOR_SERVICE) as SensorManager
         fun present(type: Int) = getString(
@@ -557,9 +649,6 @@ class MainActivity : AppCompatActivity() {
             present(Sensor.TYPE_ACCELEROMETER),
             present(Sensor.TYPE_GYROSCOPE),
             present(Sensor.TYPE_MAGNETIC_FIELD),
-            // TYPE_GRAVITY feeds grav_x/y/z, three of the velocity model's
-            // fourteen input channels. Where it is absent the sampler has to
-            // low-pass the accelerometer instead, exactly as training does.
             present(Sensor.TYPE_GRAVITY),
         )
     }

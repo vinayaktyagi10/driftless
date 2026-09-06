@@ -35,6 +35,8 @@ __pycache__/
 /android/.idea/
 *.apk
 *.aab
+*.zip
+bugreport-*.zip
 
 # C++ build
 /edge-engine/build/
