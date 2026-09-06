@@ -28,6 +28,7 @@ import com.driftless.fusion.ImuNoiseParams
 import com.driftless.fusion.UkfFusionEngine
 import com.driftless.fusion.Vec3
 import com.driftless.fusion.VelocityModel
+import com.driftless.math.norm
 import com.driftless.logging.TrackLogger
 import com.driftless.mapmatch.HmmMapMatcher
 import com.driftless.mapmatch.OsmReader
@@ -341,6 +342,14 @@ class MainActivity : AppCompatActivity() {
                                     val pred = velocityModel.predict()
                                     if (pred != null) {
                                         engine.updateVelocityModel(pred.speedMps.toDouble())
+                                    }
+                                } else {
+                                    val fix = latestFix
+                                    if (!isSimulatedBlackout && fix != null) {
+                                        val ageSec = (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9
+                                        if (ageSec in 0.0..2.0 && (!fix.hasVelocity || fix.velocityNed.norm() < 0.3)) {
+                                            engine.updateZeroVelocity(0.05)
+                                        }
                                     }
                                 }
                                 engine.updateNonHolonomic()

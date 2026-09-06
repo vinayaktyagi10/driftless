@@ -318,4 +318,67 @@ class UkfFusionEngineTest {
             result.errorAfterReacquisitionM < 5.0
         )
     }
+
+    @Test
+    fun testAntiDivergenceGnssRecoveryAfterGateLockout() {
+        val engine = UkfFusionEngine()
+        val initialFix = GnssFix(
+            timestampNanos = 1_000_000_000L,
+            position = Position(0.0, 0.0, 0.0),
+            velocityNed = Vec3(0.0, 0.0, 0.0),
+            hasVelocity = true,
+            speedAccuracyMps = 0.2,
+            horizontalAccuracyM = 3.0,
+            verticalAccuracyM = 5.0,
+            satellitesUsed = 12,
+        )
+        engine.updateGnss(initialFix)
+        assertEquals(0.0, engine.state().position.norm(), 1e-3)
+
+        // Present a fix 200m away with tight covariance (which will trigger gate rejection)
+        val distantFix1 = GnssFix(
+            timestampNanos = 2_000_000_000L,
+            position = Position(200.0, 0.0, 0.0),
+            velocityNed = Vec3(0.0, 0.0, 0.0),
+            hasVelocity = true,
+            speedAccuracyMps = 0.2,
+            horizontalAccuracyM = 3.0,
+            verticalAccuracyM = 5.0,
+            satellitesUsed = 12,
+        )
+        // 1st rejection
+        engine.updateGnss(distantFix1)
+        assertTrue(engine.state().position.norm() < 50.0)
+
+        // 2nd rejection
+        val distantFix2 = distantFix1.copy(timestampNanos = 3_000_000_000L)
+        engine.updateGnss(distantFix2)
+        assertTrue(engine.state().position.norm() < 50.0)
+
+        // 3rd fix triggers anti-divergence recovery: snaps position directly to fix
+        val distantFix3 = distantFix1.copy(timestampNanos = 4_000_000_000L)
+        engine.updateGnss(distantFix3)
+        assertEquals(200.0, engine.state().position.x, 1.0)
+    }
+
+    @Test
+    fun testVelocityClampingUnderRunawayAcceleration() {
+        val engine = UkfFusionEngine()
+        var tNanos = 1_000_000_000L
+
+        // Feed enormous 500 m/s^2 acceleration over 100 steps
+        for (i in 0 until 100) {
+            tNanos += 10_000_000L // 10 ms
+            engine.predict(
+                timestampNanos = tNanos,
+                accel = Vec3(500.0, 0.0, -9.80665),
+                gyro = Vec3(0.0, 0.0, 0.0),
+            )
+        }
+
+        // Velocity should be strictly clamped to <= 60.0 m/s
+        assertTrue("Speed must be clamped <= 60 m/s but was ${engine.state().velocity.norm()}",
+            engine.state().velocity.norm() <= 60.001)
+    }
 }
+

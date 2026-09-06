@@ -122,6 +122,7 @@ class UkfFusionEngine(
     private var lastEmittedNanos = 0L
 
     private var isOrientationInitialized = false
+    private var consecutiveGnssRejections = 0
 
     init {
         computeWeights()
@@ -175,6 +176,7 @@ class UkfFusionEngine(
 
             val dt = (timestampNanos - last) / NANOS_PER_SECOND
             if (!(dt > 0.0) || dt > config.maxStepSeconds) {
+                lastTimestampNanos = timestampNanos
                 return false
             }
 
@@ -250,6 +252,13 @@ class UkfFusionEngine(
             nominal = compose(propNominal, meanError).let {
                 it.copy(orientation = it.orientation.normalized())
             }
+
+            // Bound velocity to maximum plausible vehicle dynamics (60 m/s ~ 216 km/h)
+            val currentSpeed = nominal.velocity.norm()
+            if (currentSpeed > 60.0) {
+                nominal = nominal.copy(velocity = nominal.velocity * (60.0 / currentSpeed))
+            }
+
             sqrtCovariance = newSqrtCov
             lastTimestampNanos = timestampNanos
 
@@ -286,12 +295,45 @@ class UkfFusionEngine(
         }
 
         val sqrtR = gnssSqrtNoise(fix, useVelocity)
-        val outcome = updateLinear(H, innovation, sqrtR, config.gnss.gateConfidence)
+        var outcome = updateLinear(H, innovation, sqrtR, config.gnss.gateConfidence)
 
         if (outcome == UpdateOutcome.Applied) {
             diagnostics.gnssApplied++
+            consecutiveGnssRejections = 0
         } else if (outcome == UpdateOutcome.RejectedByGate) {
             diagnostics.gnssRejected++
+            consecutiveGnssRejections++
+
+            // Anti-divergence safeguard: if 3 consecutive fixes are rejected by the gate,
+            // the dead-reckoned state has drifted from truth. Re-anchor directly to the GNSS fix.
+            if (consecutiveGnssRejections >= 3) {
+                nominal = nominal.copy(
+                    position = Vec3(fix.position.north, fix.position.east, fix.position.down),
+                    velocity = if (useVelocity) fix.velocityNed else Vec3(0.0, 0.0, 0.0),
+                )
+                val resetSigmas = DoubleArray(STATE_DIM)
+                val posUncert = max(fix.horizontalAccuracyM, 5.0)
+                val velUncert = if (useVelocity) max(fix.speedAccuracyMps, 1.0) else 1.0
+                for (k in 0 until STATE_DIM) {
+                    resetSigmas[k] = sqrtCovariance[k, k]
+                }
+                resetSigmas[POSITION_INDEX] = posUncert
+                resetSigmas[POSITION_INDEX + 1] = posUncert
+                resetSigmas[POSITION_INDEX + 2] = max(fix.verticalAccuracyM, 5.0)
+                resetSigmas[VELOCITY_INDEX] = velUncert
+                resetSigmas[VELOCITY_INDEX + 1] = velUncert
+                resetSigmas[VELOCITY_INDEX + 2] = velUncert
+                sqrtCovariance = Matrix.diagonal(resetSigmas)
+
+                consecutiveGnssRejections = 0
+                outcome = UpdateOutcome.Applied
+                diagnostics.gnssApplied++
+            }
+        }
+
+        // If fix indicates standstill (no velocity reported or speed < 0.3 m/s), apply zero-velocity constraint
+        if (!fix.hasVelocity || fix.velocityNed.norm() < 0.3) {
+            updateZeroVelocity(0.05)
         }
 
         emitPositionIfDue(fix.timestampNanos, force = true)
@@ -533,7 +575,9 @@ class UkfFusionEngine(
             val speed = max(fix.speedAccuracyMps, p.minSpeedAccuracyMps) * inflation
             sigmas[3] = speed
             sigmas[4] = speed
-            sigmas[5] = speed
+            // Android GNSS only reports 2D horizontal speed; down velocity is pseudo-zero.
+            // Relax vertical velocity sigma to prevent false chi-squared gate rejections.
+            sigmas[5] = max(speed * 5.0, 2.0)
         }
 
         return Matrix.diagonal(sigmas)
