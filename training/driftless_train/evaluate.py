@@ -439,6 +439,25 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
+    # Only the canonical `test` evaluation owns the unsuffixed artifact names.
+    # Every other split writes beside them instead of over them: the metric
+    # files carry a _<split> suffix and the plots go in their own subdirectory.
+    # Before this, `--split val` -- which the README recommends running first,
+    # to tune the blend -- silently overwrote eval_summary.json, the two eval
+    # CSVs and blackout_error.png with val numbers, and `report` (which globs
+    # PLOT_DIR/*.png) then published val figures under a heading that says
+    # test. Nothing errored; the published numbers were just quietly wrong.
+    # Canonical means BOTH the test split AND the shipped checkpoint. Scoping
+    # by split alone is not enough: evaluating a candidate checkpoint against
+    # test would still overwrite the published artifacts with another model's
+    # numbers under the shipped model's name. That nearly happened while
+    # comparing the low-pass-augmented model.
+    ckpt_tag = "" if args.ckpt.stem == "tcn_best" else f"_{args.ckpt.stem}"
+    is_canonical = args.split == "test" and not ckpt_tag
+    suffix = "" if is_canonical else f"_{args.split}{ckpt_tag}"
+    plot_dir = PLOT_DIR if is_canonical else PLOT_DIR / f"{args.split}{ckpt_tag}"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
     model, win, out_win, chan_idx = load_model(args.ckpt, device)
     rotation = None
     if args.rotate_eval is not None:
@@ -548,15 +567,15 @@ def main(argv: list[str] | None = None) -> int:
         if n_plots < args.max_plots:
             tag = run.run_id.replace("#", "_")
             plot_blackout_segments(pred, arrays, run.run_id,
-                                   PLOT_DIR / f"blackouts60_{tag}.png",
+                                   plot_dir / f"blackouts60_{tag}.png",
                                    duration_s=60.0)
             plot_blackout_segments(pred, arrays, run.run_id,
-                                   PLOT_DIR / f"blackouts30_{tag}.png",
+                                   plot_dir / f"blackouts30_{tag}.png",
                                    duration_s=30.0)
             plot_trajectory(pred, arrays, run.run_id,
-                            PLOT_DIR / f"traj_{run.run_id.replace('#','_')}.png")
+                            plot_dir / f"traj_{run.run_id.replace('#','_')}.png")
             plot_speed_trace(pred, run.run_id,
-                             PLOT_DIR / f"speed_{run.run_id.replace('#','_')}.png")
+                             plot_dir / f"speed_{run.run_id.replace('#','_')}.png")
             n_plots += 1
 
     if not all_rows:
@@ -564,15 +583,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     import csv
-    with (METRIC_DIR / "eval_per_run.csv").open("w", newline="") as f:
+    with (METRIC_DIR / f"eval_per_run{suffix}.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(per_run[0].keys()))
         w.writeheader()
         w.writerows(per_run)
-    with (METRIC_DIR / "eval_blackouts.csv").open("w", newline="") as f:
+    with (METRIC_DIR / f"eval_blackouts{suffix}.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
         w.writeheader()
         w.writerows(all_rows)
-    plot_blackout_curve(all_rows, PLOT_DIR / "blackout_error.png")
+    plot_blackout_curve(all_rows, plot_dir / "blackout_error.png")
 
     print(f"\ngain: alpha_max={args.alpha_max} tau={args.tau}s")
     print(f"{'dur':>6} {'n':>5} | "
@@ -607,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{row['baseline_drift_med_pct']:6.2f}% | "
               f"{row['oracle_err_med_m']:10.2f}")
 
-    (METRIC_DIR / "eval_summary.json").write_text(json.dumps(
+    (METRIC_DIR / f"eval_summary{suffix}.json").write_text(json.dumps(
         {"split": args.split, "win": win, "out_win": out_win,
          "alpha_max": args.alpha_max, "tau_s": args.tau,
          "n_runs": len(per_run),
