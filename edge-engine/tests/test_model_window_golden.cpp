@@ -45,8 +45,11 @@ std::vector<double> numbersInBlock(const std::string& text, const std::string& k
 }
 
 std::string fixtureText() {
+    // Ships with the model, not with these tests: the Android app asserts
+    // against the same file, so it belongs beside MODEL_CONTRACT.md rather
+    // than inside one consumer's test directory.
     const std::string path =
-        std::string(DRIFTLESS_TEST_FIXTURE_DIR) + "/model_window_golden.json";
+        std::string(DRIFTLESS_MODEL_DIR) + "/model_window_golden.json";
     std::ifstream f(path);
     if (!f.good()) return {};
     std::ostringstream ss;
@@ -61,8 +64,9 @@ constexpr int kCh = driftless::ModelWindow::kChannels;
 TEST(ModelWindowGolden, ChannelLayoutMatchesTheTrainingPipeline) {
     const std::string text = fixtureText();
     if (text.empty()) {
-        GTEST_SKIP() << "model_window_golden.json missing -- regenerate with "
-                        "`cd training && python -m driftless_train.edge_fixture`";
+        GTEST_SKIP() << "model_window_golden.json missing -- run `cd training "
+                        "&& python -m driftless_train.edge_fixture && python "
+                        "export/to_tflite.py --copy-to-consumers`";
     }
 
     // Flat [n*3] accel and gyro, and flat [n*14] expected feature rows.

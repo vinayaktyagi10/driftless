@@ -27,8 +27,14 @@ GYRO_XYZ_COLUMNS and augment.GYRO_XYZ_IDX. Writing physical xyz straight into
 3/4/5 puts the vertical-axis rate, the single most informative channel, where
 the model learned to read a horizontal one.
 
+Runtime-agnostic on purpose: it is plain JSON of inputs and expected feature
+rows, so the C++ engine and the Android app can both assert against the same
+reference instead of each trusting its own reading of the channel table. Both
+have already got that reading wrong, in two different ways.
+
 Run:  python -m driftless_train.edge_fixture
-Out:  edge-engine/tests/fixtures/model_window_golden.json
+Out:  training/artifacts/models/model_window_golden.json
+      -> copied into both consumer trees by `--copy-to-consumers`
 """
 
 from __future__ import annotations
@@ -41,11 +47,15 @@ import numpy as np
 
 from .augment import ACC_XYZ_IDX, GRAV_XYZ_IDX, GYRO_XYZ_IDX
 from .dataset import DT, PROC_DIR
-from .paths import REPO_ROOT
+from .paths import MODEL_DIR
 from .preprocess import FEATURE_CHANNELS, _causal_gravity, imu_derived
 
 N_SAMPLES = 100          # > 80, so the last rows form a complete window
-OUT_PATH = REPO_ROOT / "edge-engine" / "tests" / "fixtures" / "model_window_golden.json"
+# Canonical home is next to the exports: the fixture is part of the model
+# contract, not a property of either consumer, and BOTH runtimes need it.
+# `to_tflite.py --copy-to-consumers` distributes it alongside MODEL_CONTRACT.md,
+# the same way the model itself reaches them.
+OUT_PATH = MODEL_DIR / "model_window_golden.json"
 
 
 def build(run_path: Path, n: int = N_SAMPLES, start: int = 0) -> dict:
