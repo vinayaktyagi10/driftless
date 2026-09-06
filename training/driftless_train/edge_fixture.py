@@ -130,7 +130,12 @@ def main(argv: list[str] | None = None) -> int:
 
     fixture = build(run, args.n, args.start)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(fixture, indent=1) + "\n")
+    # Compact: this is a generated file and the numeric arrays are ~2000
+    # values. Pretty-printing them one per line turns a 32 KB artifact into a
+    # 7000-line diff that nobody can review. The C++ reader is
+    # whitespace-insensitive.
+    text = json.dumps(fixture, separators=(",", ":"))
+    args.out.write_text(text + "\n")
     print(f"{args.n} samples from {fixture['source_run']} -> {args.out}")
     print(f"asserted channels: {fixture['assert_channels']}")
     return 0
