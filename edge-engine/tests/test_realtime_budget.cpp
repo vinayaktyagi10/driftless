@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <iostream>
 
 using namespace driftless;
 using Clock = std::chrono::steady_clock;

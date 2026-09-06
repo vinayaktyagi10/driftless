@@ -31,8 +31,6 @@ endif()
 # vendored-or-fetched convention as Eigen above: drop a copy under
 # third_party/onnxruntime/{include,lib} yourself (gitignored) to skip the
 # download, or let this pull the official Linux x64 release tarball.
-# --- ONNX Runtime (C++ API) -------------------------------------------------
-# --- ONNX Runtime (C++ API) -------------------------------------------------
 set(DRIFTLESS_ORT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime)
 set(DRIFTLESS_ORT_VERSION 1.19.2)
 
@@ -75,6 +73,10 @@ if(APPLE)
     execute_process(COMMAND xattr -cr ${DRIFTLESS_ORT_DIR} ERROR_QUIET)
 endif()
 
+# Unset before searching: find_file() caches its result, so without this a
+# lib/ directory that changes contents between configures (e.g. swapping in a
+# different ORT build) would keep resolving to the old, possibly-missing path.
+unset(DRIFTLESS_ORT_LIB_PATH CACHE)
 find_file(DRIFTLESS_ORT_LIB_PATH ${DRIFTLESS_ORT_LIB_NAME}
     PATHS ${DRIFTLESS_ORT_DIR}/lib NO_DEFAULT_PATH)
 if(NOT DRIFTLESS_ORT_LIB_PATH)
