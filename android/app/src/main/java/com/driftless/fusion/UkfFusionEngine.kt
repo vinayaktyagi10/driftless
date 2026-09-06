@@ -334,6 +334,9 @@ class UkfFusionEngine(
         // If fix indicates standstill (no velocity reported or speed < 0.3 m/s), apply zero-velocity constraint
         if (!fix.hasVelocity || fix.velocityNed.norm() < 0.3) {
             updateZeroVelocity(0.05)
+            if (nominal.velocity.norm() > 0.5) {
+                nominal = nominal.copy(velocity = Vec3(0.0, 0.0, 0.0))
+            }
         }
 
         emitPositionIfDue(fix.timestampNanos, force = true)
@@ -356,7 +359,7 @@ class UkfFusionEngine(
         val sqrtR = Matrix.diagonal(doubleArrayOf(effectiveSigma, effectiveSigma, effectiveSigma))
         val outcome = updateLinear(H, innovation, sqrtR, 0.9999)
         if (outcome == UpdateOutcome.RejectedByGate && currentSpeed > 0.0) {
-            nominal = nominal.copy(velocity = nominal.velocity * 0.5)
+            nominal = nominal.copy(velocity = if (currentSpeed > 3.0) Vec3(0.0, 0.0, 0.0) else nominal.velocity * 0.2)
         }
         outcome
     }

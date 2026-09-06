@@ -85,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private var diagnosticsExpanded = true
     private var anchorLogged = false
     private var lastFixRealtimeNanos = 0L
+    private var lastVelocityModelNanos = 0L
 
     // Filter output
     private var fusedCount = 0L
@@ -282,15 +283,19 @@ class MainActivity : AppCompatActivity() {
                             val sample = frame.toImuSample()
                             engine.predict(sample)
 
-                            // Feed sample to TFLite Velocity Model context window
-                            val hz = if (measuredHz > 10.0) measuredHz else 200.0
-                            val dtSec = 1.0 / hz
-                            velocityModel.addSample(
-                                accel = Vec3(sample.accel[0].toDouble(), sample.accel[1].toDouble(), sample.accel[2].toDouble()),
-                                gyro = Vec3(sample.gyro[0].toDouble(), sample.gyro[1].toDouble(), sample.gyro[2].toDouble()),
-                                gravity = frame.gravity?.let { Vec3(it[0].toDouble(), it[1].toDouble(), it[2].toDouble()) },
-                                dtSeconds = dtSec,
-                            )
+                            // Feed sample to TFLite Velocity Model context window at 10 Hz (100 ms).
+                            // The model expects 80 samples over 8s of driving context; feeding at 400 Hz shrinks context to 0.2s.
+                            val nowNanos = sample.timestampNanos
+                            if (lastVelocityModelNanos == 0L || (nowNanos - lastVelocityModelNanos) >= 95_000_000L) {
+                                val dtSec = if (lastVelocityModelNanos == 0L) 0.1 else (nowNanos - lastVelocityModelNanos) / 1e9
+                                lastVelocityModelNanos = nowNanos
+                                velocityModel.addSample(
+                                    accel = Vec3(sample.accel[0].toDouble(), sample.accel[1].toDouble(), sample.accel[2].toDouble()),
+                                    gyro = Vec3(sample.gyro[0].toDouble(), sample.gyro[1].toDouble(), sample.gyro[2].toDouble()),
+                                    gravity = frame.gravity?.let { Vec3(it[0].toDouble(), it[1].toDouble(), it[2].toDouble()) },
+                                    dtSeconds = dtSec,
+                                )
+                            }
 
                             logger.logImu(frame)
                         }
@@ -318,11 +323,14 @@ class MainActivity : AppCompatActivity() {
                                 if (roadGraph == null) {
                                     try {
                                         val xml = assets.open("maps/grid.osm").bufferedReader().use { it.readText() }
-                                        val osmNetwork = OsmReader.loadOsmXml(xml, frame)
+                                        // Load with autoOffset = false so synthetic test fixture is not transplanted onto live real-world drives
+                                        val osmNetwork = OsmReader.loadOsmXml(xml, frame, autoOffset = false)
                                         val graph = osmNetwork.graph
-                                        roadGraph = graph
-                                        hmmMatcher = HmmMapMatcher(graph)
-                                        Log.i(DIAG_TAG, "Initialized OSM RoadGraph with ${graph.segmentCount} segments")
+                                        if (graph.segmentCount > 0) {
+                                            roadGraph = graph
+                                            hmmMatcher = HmmMapMatcher(graph)
+                                            Log.i(DIAG_TAG, "Initialized OSM RoadGraph with ${graph.segmentCount} segments")
+                                        }
                                     } catch (e: Exception) {
                                         Log.w(DIAG_TAG, "No bundled map loaded: ${e.message}")
                                     }
@@ -338,17 +346,21 @@ class MainActivity : AppCompatActivity() {
                         while (true) {
                             try {
                                 delay(100)
-                                if (velocityModel.isReady) {
+                                val fix = latestFix
+                                val gnssAgeSec = if (fix != null) (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9 else 999.0
+                                val gnssIsActive = !isSimulatedBlackout && fix != null && gnssAgeSec in 0.0..2.0
+                                val isGnssStationary = gnssIsActive && (!fix!!.hasVelocity || fix.velocityNed.norm() < 0.3)
+
+                                if (isGnssStationary) {
+                                    // Active GNSS confirms device is stationary: strictly enforce zero velocity
+                                    engine.updateZeroVelocity(0.05)
+                                } else if (velocityModel.isReady) {
                                     val pred = velocityModel.predict()
                                     if (pred != null) {
-                                        engine.updateVelocityModel(pred.speedMps.toDouble())
-                                    }
-                                } else {
-                                    val fix = latestFix
-                                    if (!isSimulatedBlackout && fix != null) {
-                                        val ageSec = (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9
-                                        if (ageSec in 0.0..2.0 && (!fix.hasVelocity || fix.velocityNed.norm() < 0.3)) {
+                                        if (pred.speedMps <= 0.05f) {
                                             engine.updateZeroVelocity(0.05)
+                                        } else {
+                                            engine.updateVelocityModel(pred.speedMps.toDouble())
                                         }
                                     }
                                 }
