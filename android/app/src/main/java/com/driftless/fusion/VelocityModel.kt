@@ -107,7 +107,7 @@ class VelocityModel(context: Context? = null) {
         val gy = gyro.y.toFloat()
         val gz = gyro.z.toFloat()
         val gyroNorm = sqrt(gx * gx + gy * gy + gz * gz)
-        // Note on gyro axis projection: gz is yaw, gx is pitch/roll in body FRD
+        // Project physical gyro vector onto gravity unit vector
         val gyroVert = gx * gxNorm + gy * gyNorm + gz * gzNorm
         val gyroHoriz = sqrt(max(gyroNorm * gyroNorm - gyroVert * gyroVert, 0f))
 
@@ -117,9 +117,10 @@ class VelocityModel(context: Context? = null) {
         frame[0] = ax
         frame[1] = ay
         frame[2] = az
-        frame[3] = gz // gyro_yaw
-        frame[4] = gx // gyro_pitch
-        frame[5] = gy // gyro_roll
+        // Physical x/y/z map to feature slots 3/5/4 (augment.GYRO_XYZ_IDX is [3, 5, 4]; Trap 1 in training/README.md)
+        frame[3] = gx // physical x -> slot 3 (dataset "gyro_yaw")
+        frame[4] = gz // physical z -> slot 4 (dataset "gyro_pitch", true vertical axis)
+        frame[5] = gy // physical y -> slot 5 (dataset "gyro_roll")
         frame[6] = grv.x.toFloat()
         frame[7] = grv.y.toFloat()
         frame[8] = grv.z.toFloat()
@@ -136,21 +137,54 @@ class VelocityModel(context: Context? = null) {
     }
 
     val isReady: Boolean
-        get() = bufferCount >= 10
+        get() = bufferCount >= WINDOW_SIZE
 
     /**
      * Checks if recent IMU buffer is consistent with a stationary device on a desk/mount.
+     * Evaluates standard deviation of acc_norm and gyro_norm over a 2s window (20 samples).
+     * Cruising vehicles have |acc| ~ g and near-zero gyro rate, but road vibrations introduce
+     * significant variance (std > 0.15), whereas true standstill has std(acc_norm) < 0.15
+     * and std(|gyro|) < 0.01.
      */
     fun isStationary(): Boolean {
-        if (bufferCount < 5) return false
-        val lastIdx = (writeIndex - 1 + WINDOW_SIZE) % WINDOW_SIZE
-        val lastFrame = buffer[lastIdx]
-        val accNorm = lastFrame[9]
-        val gx = lastFrame[4]
-        val gy = lastFrame[5]
-        val gz = lastFrame[3]
-        val gyroNorm = sqrt(gx * gx + gy * gy + gz * gz)
-        return kotlin.math.abs(accNorm - 9.80665f) < 1.0f && gyroNorm < 0.1f
+        if (bufferCount < STATIONARY_WINDOW_SIZE) return false
+        val n = STATIONARY_WINDOW_SIZE
+        var sumAcc = 0.0
+        var sumGyro = 0.0
+
+        val accVals = DoubleArray(n)
+        val gyroVals = DoubleArray(n)
+
+        for (i in 0 until n) {
+            val idx = (writeIndex - n + i + WINDOW_SIZE) % WINDOW_SIZE
+            val f = buffer[idx]
+            val aNorm = f[9].toDouble()
+            val gx = f[3].toDouble() // physical x
+            val gz = f[4].toDouble() // physical z
+            val gy = f[5].toDouble() // physical y
+            val gNorm = sqrt(gx * gx + gy * gy + gz * gz)
+
+            accVals[i] = aNorm
+            gyroVals[i] = gNorm
+            sumAcc += aNorm
+            sumGyro += gNorm
+        }
+
+        val meanAcc = sumAcc / n
+        val meanGyro = sumGyro / n
+
+        var varAcc = 0.0
+        var varGyro = 0.0
+        for (i in 0 until n) {
+            val da = accVals[i] - meanAcc
+            val dg = gyroVals[i] - meanGyro
+            varAcc += da * da
+            varGyro += dg * dg
+        }
+        val stdAcc = sqrt(varAcc / n)
+        val stdGyro = sqrt(varGyro / n)
+
+        return stdAcc < STATIONARY_STD_ACC_MAX && stdGyro < STATIONARY_STD_GYRO_MAX
     }
 
     /**
@@ -159,6 +193,8 @@ class VelocityModel(context: Context? = null) {
      */
     fun predict(): Prediction? {
         if (!isReady) return null
+        if (bufferCount < WINDOW_SIZE) return null
+
         if (isStationary()) {
             return Prediction(
                 speedMps = 0.0f,
@@ -166,7 +202,7 @@ class VelocityModel(context: Context? = null) {
                 dvMps = 0.0f,
             )
         }
-        if (bufferCount < WINDOW_SIZE) return null
+
         val interp = interpreter ?: return null
 
         try {
@@ -196,6 +232,12 @@ class VelocityModel(context: Context? = null) {
         }
     }
 
+    internal fun getLatestFrame(): FloatArray? {
+        if (bufferCount == 0) return null
+        val lastIdx = (writeIndex - 1 + WINDOW_SIZE) % WINDOW_SIZE
+        return buffer[lastIdx].clone()
+    }
+
     fun close() {
         interpreter?.close()
         interpreter = null
@@ -205,6 +247,9 @@ class VelocityModel(context: Context? = null) {
         const val WINDOW_SIZE = 80
         const val NUM_CHANNELS = 14
         const val GRAVITY_TAU_S = 10.0f
+        const val STATIONARY_WINDOW_SIZE = 20 // 2s at 10 Hz
+        const val STATIONARY_STD_ACC_MAX = 0.15
+        const val STATIONARY_STD_GYRO_MAX = 0.01
         const val MODEL_PATH = "models/velocity_model.tflite"
         private const val TAG = "VelocityModel"
 
