@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="@string/pref_category_sampling">
+
+        <!-- Default is FASTEST because the fusion engine's predict step is tuned
+             for roughly 200 Hz; the slower options exist so a long battery test
+             is possible, not because they are good for accuracy. -->
+        <ListPreference
+            app:key="sensor_rate"
+            app:title="@string/pref_sensor_rate_title"
+            app:entries="@array/sensor_rate_entries"
+            app:entryValues="@array/sensor_rate_values"
+            app:defaultValue="0"
+            app:useSimpleSummaryProvider="true" />
+
+        <ListPreference
+            app:key="gnss_interval_ms"
+            app:title="@string/pref_gnss_interval_title"
+            app:entries="@array/gnss_interval_entries"
+            app:entryValues="@array/gnss_interval_values"
+            app:defaultValue="1000"
+            app:useSimpleSummaryProvider="true" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_category_about">
+        <Preference
+            app:key="frames"
+            app:title="@string/pref_frames_title"
+            app:summary="@string/pref_frames_summary"
+            app:selectable="false" />
+    </PreferenceCategory>
+
+</PreferenceScreen>

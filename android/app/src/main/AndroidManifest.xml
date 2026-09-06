@@ -1,23 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- osmdroid fetches every tile over HTTP. Without INTERNET the map comes up
+         blank with no error in the log, which is a miserable thing to debug. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Required for >200 Hz sampling on Android 12+; the fusion engine is tuned
+         for roughly that rate, so without this the predict step is starved. -->
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
+    <!-- required="false" throughout: a phone with no gyroscope should get a
+         degraded app, not an install-time rejection. The samplers check at
+         runtime and report what is actually present. -->
+    <uses-feature
+        android:name="android.hardware.sensor.accelerometer"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.sensor.gyroscope"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.sensor.compass"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
     <application
+        android:name=".DriftlessApp"
         android:label="Driftless"
         android:allowBackup="false"
         android:theme="@style/Theme.Driftless">
 
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:parentActivityName=".ui.MainActivity" />
     </application>
 
 </manifest>

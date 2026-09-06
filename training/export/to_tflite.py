@@ -64,13 +64,23 @@ def copy_to_consumers() -> None:
         shutil.copy2(src, dest_dir / dest_name)
         print(f"{src_name} -> {dest_dir / dest_name}")
 
-    # A stray sidecar from an older export would be loaded in preference to
-    # nothing and silently shadow the current weights -- delete it.
+    # Anything an older export left in these directories. Two kinds, both
+    # actively harmful rather than merely untidy:
+    #   * a sidecar, which would be loaded in preference to nothing and
+    #     silently shadow the current weights;
+    #   * the pre-rename model files. A `tcn_speed_heading.onnx` from before
+    #     external_data=False is a broken file -- it records a sidecar name
+    #     internally and fails to load -- sitting in the very directory the
+    #     engine reads, one plausible typo away from the right one.
+    # These are gitignored, so a fresh clone never sees them; the developer who
+    # ran the old export does, which is who this is for.
     for stale in (EDGE_MODELS_DIR / "tcn_speed_heading.onnx.data",
-                  EDGE_MODELS_DIR / "velocity_model.onnx.data"):
+                  EDGE_MODELS_DIR / "velocity_model.onnx.data",
+                  EDGE_MODELS_DIR / "tcn_speed_heading.onnx",
+                  ANDROID_ASSETS_DIR / "tcn_speed_heading.tflite"):
         if stale.exists():
             stale.unlink()
-            print(f"removed stale sidecar {stale.name}")
+            print(f"removed superseded {stale.name}")
 
     # Next to the files themselves, in both trees -- the contract is about both
     # runtimes and whoever opens one directory should find it there.

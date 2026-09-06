@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Driftless</string>
+    <string name="settings_title">Settings</string>
+
+    <string name="perm_status_checking">Checking permissions…</string>
+    <string name="perm_status_granted">Precise location granted. Sensors ready.</string>
+    <string name="perm_status_needed">Driftless needs precise location to anchor the
+        dead-reckoning track to a starting fix.</string>
+    <string name="perm_status_rationale">Without precise location there is nothing to
+        anchor the track to, and nothing to correct its drift against. The app cannot
+        do anything useful until this is granted.</string>
+    <string name="perm_status_permanently_denied">Location is permanently denied. Android
+        will not show the prompt again — it has to be granted from app settings.</string>
+    <string name="perm_status_coarse_only">Approximate location only. That is roughly
+        1–3 km of error, which is far larger than the drift this app exists to
+        measure. Grant PRECISE location to continue.</string>
+
+    <string name="perm_status_services_off">Location permission is granted, but Location
+        is switched off for the whole phone, so no fix will ever arrive. Turn it on in
+        system settings.</string>
+
+    <string name="action_open_location_settings">Turn on Location</string>
+    <string name="action_grant">Grant permission</string>
+    <string name="action_open_settings">Open app settings</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_recentre">Re-centre</string>
+    <string name="action_start_blackout">Start blackout</string>
+    <string name="action_stop_blackout">Stop blackout</string>
+    <string name="diagnostics_badge_fmt">%1$d Hz · %2$d sats · %3$.1f m · %4$.0fs</string>
+
+    <string name="sensor_availability_fmt">Accelerometer %1$s · Gyroscope %2$s ·
+        Magnetometer %3$s · Gravity %4$s</string>
+    <string name="sensor_present">yes</string>
+    <string name="sensor_absent">MISSING</string>
+
+    <!-- Settings screen -->
+    <string name="pref_category_sampling">Sampling</string>
+    <string name="pref_sensor_rate_title">IMU sample rate</string>
+    <string name="pref_sensor_rate_summary">%s</string>
+    <string name="pref_gnss_interval_title">GNSS update interval</string>
+    <string name="pref_gnss_interval_summary">%s</string>
+
+    <string name="pref_category_about">About</string>
+    <string name="pref_frames_title">Frame conventions</string>
+    <string name="pref_frames_summary">Nav: local-tangent NED, anchored at first fix.
+        Body: FRD. Attitude: Hamilton quaternion, body → nav.</string>
+</resources>
