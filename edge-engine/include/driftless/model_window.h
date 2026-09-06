@@ -47,7 +47,10 @@ private:
 // Channel order matches FEATURE_CHANNELS = IMU_CHANNELS + DERIVED_CHANNELS
 // in training/driftless_train/preprocess.py:
 //   0 acc_x   1 acc_y   2 acc_z
-//   3 gyro[0] ("gyro_yaw" slot)   4 gyro[1] ("gyro_pitch" slot)   5 gyro[2] ("gyro_roll" slot)
+//   3 gyro.x ("gyro_yaw" slot)  4 gyro.Z ("gyro_pitch" slot)  5 gyro.Y ("gyro_roll" slot)
+//     ^ note 4 and 5: the slot names follow the phone dataset's raw column
+//       order, which is NOT physical x/y/z. Physical z (vertical rate) belongs
+//       in slot 4.
 //   6 grav_x  7 grav_y  8 grav_z   (running gravity-lowpass estimate, not raw accel)
 //   9 acc_norm  10 acc_vert  11 acc_horiz  12 gyro_vert  13 gyro_horiz
 //
@@ -78,9 +81,15 @@ public:
         row[0] = static_cast<float>(sample.accel.x());
         row[1] = static_cast<float>(sample.accel.y());
         row[2] = static_cast<float>(sample.accel.z());
+        // Physical x/y/z map to feature slots 3/5/4, NOT 3/4/5. The slot
+        // names are inherited from the phone dataset's raw column order, in
+        // which the column headed "gyro_pitch" (slot 4) is the vertical-axis
+        // rate -- see training/driftless_train/augment.py, GYRO_XYZ_IDX ==
+        // [3, 5, 4], and trap 1 in training/README.md. Pinned by
+        // test_model_window_golden.
         row[3] = static_cast<float>(sample.gyro.x());
-        row[4] = static_cast<float>(sample.gyro.y());
-        row[5] = static_cast<float>(sample.gyro.z());
+        row[5] = static_cast<float>(sample.gyro.y());
+        row[4] = static_cast<float>(sample.gyro.z());
         row[6] = static_cast<float>(g.x());
         row[7] = static_cast<float>(g.y());
         row[8] = static_cast<float>(g.z());
