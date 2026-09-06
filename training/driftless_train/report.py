@@ -484,6 +484,22 @@ def main(argv: list[str] | None = None) -> int:
         "pytest tests/ -q                      # pins every dataset trap",
         "```",
         "",
+        "**What reproduces exactly, and what does not.** `prepare` rebuilds the "
+        "51 processed runs bit-identically from the raw CSVs — verified across "
+        "all nine arrays and `index.json` — and every metric and export above "
+        "regenerates byte-for-byte from the committed checkpoint. Retraining is "
+        "the exception: the shipped checkpoint was trained before the run was "
+        "seeded, so `train` produces a *different* model. An identical 40-epoch "
+        "recipe measured 34.68 m at a 30 s blackout against the shipped model's "
+        "31.39 m — about 10 %, from the seed alone. That is why the checkpoint "
+        "is committed as a binary rather than treated as regenerable. Training "
+        "now takes `--seed` (default 0) and is reproducible from here on: two "
+        "runs at the same seed match to every digit of the loss.",
+        "",
+        "Read that 10 % as a floor on how precisely any single-split number "
+        "should be quoted. It is separate from, and smaller than, the route "
+        "variance the cross-validation measures.",
+        "",
     ]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

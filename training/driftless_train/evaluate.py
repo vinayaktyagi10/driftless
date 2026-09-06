@@ -447,9 +447,15 @@ def main(argv: list[str] | None = None) -> int:
     # CSVs and blackout_error.png with val numbers, and `report` (which globs
     # PLOT_DIR/*.png) then published val figures under a heading that says
     # test. Nothing errored; the published numbers were just quietly wrong.
-    is_canonical = args.split == "test"
-    suffix = "" if is_canonical else f"_{args.split}"
-    plot_dir = PLOT_DIR if is_canonical else PLOT_DIR / args.split
+    # Canonical means BOTH the test split AND the shipped checkpoint. Scoping
+    # by split alone is not enough: evaluating a candidate checkpoint against
+    # test would still overwrite the published artifacts with another model's
+    # numbers under the shipped model's name. That nearly happened while
+    # comparing the low-pass-augmented model.
+    ckpt_tag = "" if args.ckpt.stem == "tcn_best" else f"_{args.ckpt.stem}"
+    is_canonical = args.split == "test" and not ckpt_tag
+    suffix = "" if is_canonical else f"_{args.split}{ckpt_tag}"
+    plot_dir = PLOT_DIR if is_canonical else PLOT_DIR / f"{args.split}{ckpt_tag}"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     model, win, out_win, chan_idx = load_model(args.ckpt, device)
