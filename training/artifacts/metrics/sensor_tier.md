@@ -1,6 +1,6 @@
 # Sensor-tier transfer: can the phone model serve a cleaner IMU?
 
-Measured on 3 trusted held-out run(s) (S/S1, S/S4) with the shipped checkpoint, unmodified. A cleaner sensor is simulated by low-passing the raw accelerometer and gyroscope axes and re-deriving the attitude-invariant channels — which also simulates the anti-alias filtering that decimating a 200 Hz FOG stream to 10 Hz would apply.
+Measured on 3 trusted held-out run(s) (S/S1, S/S4) with `tcn_best.pt`, unmodified. A cleaner sensor is simulated by low-passing the raw accelerometer and gyroscope axes and re-deriving the attitude-invariant channels — which also simulates the anti-alias filtering that decimating a 200 Hz FOG stream to 10 Hz would apply.
 
 Ratios are **paired per route** against that route's own native result, so route difficulty cancels; the cross-validation showed per-route 30 s medians spanning a factor of 1.8, so unpaired numbers would be noise.
 

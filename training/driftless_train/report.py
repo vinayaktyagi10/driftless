@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import date
 from pathlib import Path
 
 from .paths import ARTIFACT_DIR as ART
@@ -63,6 +62,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     ev = _load(METRIC_DIR / "eval_summary.json")
+    # This doc presents the unsuffixed eval artifacts as the TEST split. An
+    # older `--split val` run used to overwrite them in place; that can no
+    # longer happen, but a file written before the fix would still be sitting
+    # here, so check rather than trust.
+    if isinstance(ev, dict) and ev.get("split") not in (None, "test"):
+        raise SystemExit(
+            f"eval_summary.json holds the '{ev['split']}' split, not 'test'. "
+            f"Regenerate with `python -m driftless_train.evaluate --split test` "
+            f"before building the report.")
     noise = _load(METRIC_DIR / "measurement_noise.json")
     allan = _load(METRIC_DIR / "allan_imu_noise.json")
     cv = _load(METRIC_DIR / "crossval.json")
@@ -87,7 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         "# Driftless — Round 1 evidence",
         "",
         "SIH 2026 · PS #26168 (ISRO) · role 03 (data + model training)",
-        f"Generated {date.today().isoformat()} from the artifacts in this repo.",
+        # No date stamp: it made this tracked file dirty on every
+        # regeneration, so a real change was indistinguishable from a re-run.
+        # Git history is the provenance, and it is more trustworthy anyway.
+        "Generated from the artifacts in this repo by "
+        "`python -m driftless_train.report`.",
         "",
         "## 1. What was built",
         "",
