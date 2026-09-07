@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import com.driftless.frames.LocalTangentFrame
+import com.driftless.fusion.FusedPosition
 import com.driftless.fusion.GnssFix
 import com.driftless.sensors.ImuFrame
 import kotlinx.coroutines.CoroutineScope
@@ -133,6 +134,34 @@ class TrackLogger(
                 append(""","sigmaSpeed":${r(fix.speedAccuracyMps)}""")
             }
             append(""","sats":${fix.satellitesUsed}}""")
+        }
+    )
+
+    /**
+     * The engine's own output, timestamped by the caller rather than carried
+     * on [FusedPosition] itself (which has none) — this is what a blackout
+     * drift analysis diffs against the raw fixes in [logFix], so it needs the
+     * same monotonic clock those use.
+     */
+    fun logFused(fused: FusedPosition, timestampNanos: Long) = offer(
+        buildString {
+            append("""{"t":"fused","ts":$timestampNanos""")
+            append(""","lat":${fused.lat},"lon":${fused.lon}""")
+            append(""","hdg":${f(fused.headingDegrees)}""")
+            append(""","spd":${f(fused.speedMetersPerSec)}""")
+            append(""","conf":${f(fused.confidence)}}""")
+        }
+    )
+
+    /**
+     * Marks a software-injected GNSS blackout window. Written alongside — not
+     * instead of — the raw fixes in [logFix], so post-drive analysis can slice
+     * out exactly the window where fixes were withheld from the engine while
+     * still having ground truth to score drift against.
+     */
+    fun logBlackout(active: Boolean, timestampNanos: Long) = offer(
+        buildString {
+            append("""{"t":"blackout","ts":$timestampNanos,"active":$active}""")
         }
     )
 

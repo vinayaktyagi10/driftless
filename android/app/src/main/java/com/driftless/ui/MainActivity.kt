@@ -165,9 +165,9 @@ class MainActivity : AppCompatActivity() {
         binding.settingsButton.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-
         binding.blackoutButton.setOnClickListener {
             isSimulatedBlackout = !isSimulatedBlackout
+            logger.logBlackout(isSimulatedBlackout, SystemClock.elapsedRealtimeNanos())
             if (isSimulatedBlackout) {
                 blackoutStartNanos = SystemClock.elapsedRealtimeNanos()
                 blackoutDistanceM = 0.0
@@ -285,6 +285,13 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 val file = logger.start(settings.sensorDelay, settings.gnssIntervalMillis)
                 Log.i(DIAG_TAG, "logging to ${file?.absolutePath ?: "<unavailable>"}")
+                // TEMPORARY: manual blackout injection, see activity_main.xml.
+                // Stated at every open because the flag outlives the file it
+                // was set in: arming it before sampling drops the button's edge
+                // event on a null channel, and a STOP -> START opens a new file
+                // mid-blackout. Without this the log shows the drift with no
+                // marker explaining it, which reads as ordinary engine drift.
+                logger.logBlackout(isSimulatedBlackout, SystemClock.elapsedRealtimeNanos())
 
                 try {
                     // 1. IMU Propagation Loop (200 - 500 Hz)
@@ -327,7 +334,11 @@ class MainActivity : AppCompatActivity() {
                             latestFix = fix
                             lastFixRealtimeNanos = SystemClock.elapsedRealtimeNanos()
 
-                            // Pass fix to filter only if not in simulated blackout mode
+                            // Withheld from the engine, not from the log — a
+                            // blackout is a test of what the engine does
+                            // without a fix, and the fix must survive
+                            // untouched as the ground truth to score that
+                            // against afterwards.
                             if (!isSimulatedBlackout) {
                                 engine.updateGnss(fix)
                             }
@@ -433,6 +444,7 @@ class MainActivity : AppCompatActivity() {
                             }
 
                             track.addFusedPoint(fused)
+                            logger.logFused(fused, SystemClock.elapsedRealtimeNanos())
 
                             // Accumulate blackout dead-reckoning metrics
                             if (isSimulatedBlackout) {

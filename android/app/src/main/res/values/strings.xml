@@ -27,6 +27,8 @@
     <string name="action_recentre">Re-centre</string>
     <string name="action_blackout_start">Simulate GPS Blackout</string>
     <string name="action_blackout_stop">Restore GNSS Aiding</string>
+    <string name="action_start_blackout">Start blackout</string>
+    <string name="action_stop_blackout">Stop blackout</string>
     <string name="blackout_banner_fmt">TUNNEL BLACKOUT: %1$.1fs / 60s · Dist: %2$.1fm · Drift: %3$.2f%%</string>
     <string name="diagnostics_badge_fmt">%1$d Hz · %2$d sats · %3$.1f m · %4$.0fs</string>
 
