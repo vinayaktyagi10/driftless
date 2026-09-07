@@ -37,7 +37,7 @@ class VelocityModelTest {
     }
 
     @Test
-    fun testIsReadyRequiresFullWindow() {
+    fun testIsReadyRequiresFullWindowAndGravityWarmup() {
         val model = VelocityModel()
         val accel = Vec3(0.0, 0.0, 9.80665)
         val gyro = Vec3(0.0, 0.0, 0.0)
@@ -53,8 +53,22 @@ class VelocityModelTest {
         }
         assertFalse("Model should not be ready at 79 samples", model.isReady)
 
-        model.addSample(accel, gyro) // 80th sample
-        assertTrue("Model should be ready at 80 samples", model.isReady)
+        model.addSample(accel, gyro) // 80th sample: window full, gravity EMA still settling
+        assertFalse(
+            "A full window alone is not enough: the gravity low-pass is a one-pole EMA with " +
+                "tau = 10 s and needs ~3 tau to converge, so acc_vert / acc_horiz / gyro_vert / " +
+                "gyro_horiz are still referenced to a swinging gravity direction and the model " +
+                "returns confident nonsense. training/README.md drops these `gravity_warmup` windows.",
+            model.isReady,
+        )
+
+        for (i in 80 until VelocityModel.GRAVITY_WARMUP_SAMPLES) {
+            model.addSample(accel, gyro)
+        }
+        assertTrue(
+            "Model should be ready once the window is full and gravity has settled",
+            model.isReady,
+        )
     }
 
     @Test

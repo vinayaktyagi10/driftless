@@ -42,6 +42,7 @@ class VelocityModel(context: Context? = null) {
     private val buffer = Array(WINDOW_SIZE) { FloatArray(NUM_CHANNELS) }
     private var bufferCount = 0
     private var writeIndex = 0
+    private var totalSamples = 0
 
     // Causal one-pole gravity low-pass filter: y[n] = a * y[n-1] + (1 - a) * x[n]
     private var gravLp = floatArrayOf(0f, 0f, 9.80665f)
@@ -134,10 +135,21 @@ class VelocityModel(context: Context? = null) {
         if (bufferCount < WINDOW_SIZE) {
             bufferCount++
         }
+        if (totalSamples < GRAVITY_WARMUP_SAMPLES) {
+            totalSamples++
+        }
     }
 
+    // Needs a full window AND a settled gravity estimate. The gravity low-pass is a
+    // one-pole EMA with tau = 10 s, so it takes ~3 tau to converge; until then
+    // acc_vert / acc_horiz / gyro_vert / gyro_horiz -- 4 of the 14 channels -- are
+    // computed against a gravity direction that is still swinging, and the model
+    // returns confident nonsense rather than an error. training/README.md marks these
+    // windows `gravity_warmup` and drops them; the app must match, and it matters more
+    // now that updateVelocityModel's anti-divergence snap makes this output
+    // authoritative for filter velocity rather than merely one weak measurement.
     val isReady: Boolean
-        get() = bufferCount >= WINDOW_SIZE
+        get() = bufferCount >= WINDOW_SIZE && totalSamples >= GRAVITY_WARMUP_SAMPLES
 
     /**
      * Checks if recent IMU buffer is consistent with a stationary device on a desk/mount.
@@ -248,6 +260,7 @@ class VelocityModel(context: Context? = null) {
         const val WINDOW_SIZE = 80
         const val NUM_CHANNELS = 14
         const val GRAVITY_TAU_S = 10.0f
+        const val GRAVITY_WARMUP_SAMPLES = 300 // 3 * GRAVITY_TAU_S at 10 Hz
         const val MIN_STATIONARY_SAMPLES = 10 // 1s at 10 Hz allows immediate standstill detection
         const val STATIONARY_WINDOW_SIZE = 20 // 2s at 10 Hz
         // Measured over all 51 held-out IO-VNBD runs (983,401 windows), with

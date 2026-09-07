@@ -58,7 +58,25 @@ class UkfFusionEngine(
 
     data class NonHolonomicParams(
         val lateralSigmaMps: Double = 0.3,
-        val verticalSigmaMps: Double = 0.3,
+        // Deliberately loose, and NOT symmetric with the lateral term. The constraint is applied
+        // in the PHONE's body frame, but "a vehicle does not move sideways or vertically" is a
+        // statement about the VEHICLE frame, and nothing here estimates the rotation between the
+        // two. Lateral survives that, because a phone in a cradle is aimed roughly along the
+        // vehicle's axis, so a yaw error is small. Vertical does not: at mount pitch theta a
+        // vehicle moving horizontally at v has body-frame vertical velocity v*sin(theta), which
+        // on the real 35 degree dash mount is 10.9 m/s at 19 m/s road speed. Asserting that is
+        // zero to within 0.3 m/s is a 36-sigma false statement, injected at 10 Hz, and it
+        // wrecks everything downstream -- SyntheticDriveTest measures 144.8 m of blackout drift
+        // and 71% of GNSS fixes rejected by the innovation gate at sigma 0.3, against 1.5 m and
+        // 4% at 10.0. The road drive on 2026-09-07 showed 74% rejection, matching the model.
+        //
+        // The principled value is ~v*sin(mount pitch), so this wants to become a function of an
+        // estimated mount rotation rather than a constant. Until then 10.0 spans the plausible
+        // range of handheld and cradle angles. Do not tighten it without either mount-rotation
+        // compensation or a re-measurement on a tilted mount; 100.0 disables the constraint
+        // entirely and is measurably worse (7.5 m), so there is real information here at the
+        // right sigma.
+        val verticalSigmaMps: Double = 10.0,
         val minSpeedMps: Double = 2.0,
         val gateConfidence: Double = 0.99,
     )
@@ -68,6 +86,21 @@ class UkfFusionEngine(
         val biasMps: Double = 0.0,
         val correlationInflation: Double = 2.0,
         val gateConfidence: Double = 0.99,
+        /** Forward-speed disagreement, m/s, above which the anti-divergence snap re-writes velocity. */
+        val snapDivergenceMps: Double = 3.0,
+        // Compare the model against horizontal ground speed, NOT the phone's body-x axis.
+        // The model's 14 input channels are attitude-invariant by construction (acc_vert,
+        // acc_horiz, gyro_vert, gyro_horiz are all referenced to estimated gravity), so it
+        // predicts vehicle forward speed regardless of how the handset sits. Scoring that
+        // against bodyVelocity(s).x threw the invariance away: at mount pitch theta the body-x
+        // component of horizontal motion is only v*cos(theta), so feeding a correct prediction
+        // of v forced the filter up to v/cos(theta) to satisfy it -- 1.22x at the real 35 degree
+        // mount, and worse once it compounded with attitude error. Replaying the 2026-09-07
+        // drive, body-x with aiding gave 12.59 m median position error, a 2.42x speed
+        // overestimate and 140 m median blackout drift; ground speed gave 3.23 m, 1.21x and
+        // 72 m. It is also the only setting where velocity aiding improves blackout at all
+        // rather than degrading it. Set false only to reproduce the old behaviour.
+        val useGroundSpeed: Boolean = true,
     )
 
     data class MapMatchParams(
@@ -88,6 +121,7 @@ class UkfFusionEngine(
         var mapMatchSkipped: Int = 0,
         var velocityModelApplied: Int = 0,
         var velocityModelRejected: Int = 0,
+        var velocityModelSnaps: Int = 0,
     )
 
     data class Config(
@@ -474,9 +508,10 @@ class UkfFusionEngine(
 
         val correctedSpeedMps = max(0.0, predictedForwardSpeedMps - p.biasMps)
 
-        val h = { s: NavState ->
-            val bVel = bodyVelocity(s)
-            doubleArrayOf(bVel.x) // forward body velocity
+        val h = if (p.useGroundSpeed) {
+            { s: NavState -> doubleArrayOf(hypot(s.velocity.x, s.velocity.y)) }
+        } else {
+            { s: NavState -> doubleArrayOf(bodyVelocity(s).x) }
         }
 
         val sqrtR = Matrix(1, 1, doubleArrayOf(p.sigmaMps * p.correlationInflation))
@@ -489,12 +524,29 @@ class UkfFusionEngine(
             diagnostics.velocityModelRejected++
             consecutiveVelocityModelRejections++
 
-            // Anti-divergence safeguard: if the filter velocity drifts away from the velocity model prediction
-            // (e.g. 2 consecutive rejections, or a divergence > 3.0 m/s), pull the forward velocity
-            // back to the model's estimate to prevent gravity tilt from accelerating to runaway speeds.
+            // Anti-divergence safeguard: pull forward velocity back to the model's estimate when
+            // the filter has drifted away from it. ONLY on gate rejection -- that restriction is
+            // deliberate and was re-confirmed by experiment, so do not "fix" it.
+            //
+            // It was briefly made unconditional on 2026-09-07, reasoning that sigmaMps *
+            // correlationInflation = 5.79 m/s is loose enough for a runaway state to pass the
+            // gate, leaving the guard unreachable in the very failure it was written for. That
+            // reasoning was right about the mechanism and wrong about the cause: the runaway came
+            // from NonHolonomicParams.verticalSigmaMps asserting zero body-vertical velocity on a
+            // 35-degree mount, not from anything this guard could see. With that fixed there is no
+            // runaway left to catch, and firing unconditionally is actively harmful -- the 3.0 m/s
+            // threshold is only 1.36 sigma of the model's own 2.2 m/s noise, so it trips on noise
+            // and hard-writes filter velocity to a noisy single sample.
+            //
+            // SyntheticDriveTest, 12 seeds, 20 s blackout, median blackout position error:
+            //     unconditional, 3.0 m/s   47.5 m   (49% of GNSS fixes then rejected)
+            //     unconditional, 8.8 m/s   47.6 m   (26%)
+            //     rejection-only           12.7 m   ( 4%)
+            //     no velocity aiding        6.0 m
+            // Raising the threshold does not rescue it; the gating is what matters.
             val currentForwardSpeed = bodyVelocity(nominal).x
             val divergence = kotlin.math.abs(currentForwardSpeed - correctedSpeedMps)
-            if (consecutiveVelocityModelRejections >= 2 || divergence > 3.0) {
+            if (consecutiveVelocityModelRejections >= 2 || divergence > p.snapDivergenceMps) {
                 val forwardNed = nominal.orientation.rotate(Vec3(1.0, 0.0, 0.0))
                 nominal = nominal.copy(velocity = forwardNed * correctedSpeedMps)
                 val velUncert = max(p.sigmaMps, 1.5)
@@ -507,6 +559,7 @@ class UkfFusionEngine(
                 resetSigmas[VELOCITY_INDEX + 2] = velUncert
                 sqrtCovariance = Matrix.diagonal(resetSigmas)
                 consecutiveVelocityModelRejections = 0
+                diagnostics.velocityModelSnaps++
             }
         }
         outcome

@@ -39,6 +39,7 @@ import com.driftless.sensors.GnssSampler
 import com.driftless.sensors.ImuFrame
 import com.driftless.sensors.ImuSampler
 import com.driftless.settings.AppSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.android.asCoroutineDispatcher
@@ -452,6 +453,16 @@ class MainActivity : AppCompatActivity() {
                                     }
                                 }
                                 engine.updateNonHolonomic()
+                            } catch (e: CancellationException) {
+                                // MUST rethrow. CancellationException is an Exception, so the
+                                // generic catch below swallowed it: delay() threw on cancel, the
+                                // catch logged, while (true) span straight back round, delay()
+                                // threw again immediately. The result was a tight loop that
+                                // ignored cancellation entirely -- it outlived the Activity that
+                                // started it, pinned a core, and wrote 4.28 million lines to
+                                // logcat in one drive, which is the shape of process Android
+                                // freezes and then kills.
+                                throw e
                             } catch (e: Exception) {
                                 Log.w(DIAG_TAG, "Aiding loop tick error: ${e.message}")
                             }
@@ -641,11 +652,12 @@ class MainActivity : AppCompatActivity() {
         appendLine(
             String.format(
                 Locale.US,
-                "  updates: GNSS applied=%d (rej=%d)  NHC=%d  TFLite=%d  Map=%d",
+                "  updates: GNSS applied=%d (rej=%d)  NHC=%d  TFLite=%d (snap=%d)  Map=%d",
                 diag.gnssApplied,
                 diag.gnssRejected,
                 diag.nhcApplied,
                 diag.velocityModelApplied,
+                diag.velocityModelSnaps,
                 diag.mapMatchApplied,
             )
         )
