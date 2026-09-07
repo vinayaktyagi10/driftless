@@ -383,8 +383,9 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 if (roadGraph == null) {
                                     try {
-                                        val xml = assets.open("maps/grid.osm").bufferedReader().use { it.readText() }
-                                        // Load with autoOffset = false so synthetic test fixture is not transplanted onto live real-world drives
+                                        val xml = assets.open("maps/campus_roads.osm").bufferedReader().use { it.readText() }
+                                        // Load with autoOffset = false: this is real georeferenced OSM data
+                                        // for the actual test-drive area, not a synthetic fixture to re-center.
                                         val osmNetwork = OsmReader.loadOsmXml(xml, frame, autoOffset = false)
                                         val graph = osmNetwork.graph
                                         if (graph.segmentCount > 0) {
