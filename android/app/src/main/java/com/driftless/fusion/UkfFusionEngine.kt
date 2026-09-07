@@ -416,24 +416,14 @@ class UkfFusionEngine(
             }
         }
 
-        // Heading / course alignment from GNSS ground track
-        if (useVelocity && fix.velocityNed.norm() > 1.5) {
+        // Heading alignment from GNSS ground track: one-time initial fix only.
+        // TEST REVERT (test/heading-nudge-revert): dropped the per-fix boxPlus nudge
+        // toward atan2(vy,vx) added in fe415f6 - suspected source of zigzag on
+        // straight-line driving, since raw GNSS course is noisy at moderate speed
+        // and was being blended into attitude on top of the UKF's own velocity update.
+        if (!isHeadingInitialized && useVelocity && fix.velocityNed.norm() > 1.5) {
             val courseRad = atan2(fix.velocityNed.y, fix.velocityNed.x)
-            if (!isHeadingInitialized) {
-                alignHeading(courseRad)
-            } else {
-                val forwardNed = nominal.orientation.rotate(Vec3(1.0, 0.0, 0.0))
-                val currentHdg = atan2(forwardNed.y, forwardNed.x)
-                var diff = (courseRad - currentHdg + Math.PI) % (2.0 * Math.PI) - Math.PI
-                if (diff < -Math.PI) diff += 2.0 * Math.PI
-                if (kotlin.math.abs(diff) < Math.toRadians(45.0)) {
-                    nominal = nominal.copy(
-                        orientation = So3.boxPlus(nominal.orientation, Vec3(0.0, 0.0, diff * 0.25))
-                    )
-                } else if (outcome == UpdateOutcome.Applied) {
-                    alignHeading(courseRad)
-                }
-            }
+            alignHeading(courseRad)
         }
 
         // If fix indicates standstill (no velocity reported or speed < 0.3 m/s), apply zero-velocity constraint
