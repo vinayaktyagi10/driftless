@@ -90,6 +90,19 @@ def copy_to_consumers() -> None:
         contract.write_text(MODEL_CONTRACT)
         print(f"contract -> {contract}")
 
+    # The golden fixture travels with the contract, for the same reason: both
+    # runtimes build the input tensor themselves and neither can check its
+    # channel layout without the pipeline's own reference values. Missing is not
+    # fatal -- the consumer tests skip -- so this does not fail the export.
+    golden = MODEL_DIR / "model_window_golden.json"
+    if golden.exists():
+        for dest_dir in dests.values():
+            shutil.copy2(golden, dest_dir / golden.name)
+            print(f"golden fixture -> {dest_dir / golden.name}")
+    else:
+        print("no model_window_golden.json; generate with "
+              "`python -m driftless_train.edge_fixture`")
+
 
 MODEL_CONTRACT = """\
 # velocity_model — input/output contract

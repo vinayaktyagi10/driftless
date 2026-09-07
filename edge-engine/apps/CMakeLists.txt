@@ -1,0 +1,4 @@
+add_executable(driftless_realtime_runner realtime_runner.cpp)
+target_link_libraries(driftless_realtime_runner PRIVATE driftless_edge)
+set_target_properties(driftless_realtime_runner PROPERTIES
+    BUILD_RPATH ${DRIFTLESS_ORT_DIR}/lib)
