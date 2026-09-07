@@ -95,10 +95,12 @@ class MainActivity : AppCompatActivity() {
     private var measuredHz = 0.0
     @Volatile private var latestFrame: ImuFrame? = null
     private var gnssCount = 0L
-    private var latestFix: GnssFix? = null
+    // @Volatile: written on Main (loop 2, the GNSS loop), read on
+    // fusionDispatcher (loop 3, the aiding loop's staleness gate).
+    @Volatile private var latestFix: GnssFix? = null
     private var diagnosticsExpanded = true
     private var anchorLogged = false
-    private var lastFixRealtimeNanos = 0L
+    @Volatile private var lastFixRealtimeNanos = 0L
     private var lastVelocityModelNanos = 0L
 
     // Filter output
@@ -224,8 +226,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        velocityModel.close()
+        // Stop the thread before closing the interpreter it may be mid-inference
+        // on -- repeatOnLifecycle cancellation only takes effect at a suspension
+        // point, and Interpreter.run() is blocking, not suspending, so closing
+        // first risks a native use-after-free.
         fusionThread.quitSafely()
+        fusionThread.join(THREAD_JOIN_TIMEOUT_MS)
+        velocityModel.close()
         super.onDestroy()
     }
 
@@ -710,6 +717,7 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val DIAG_TAG = "DriftlessDiag"
         const val MAP_GESTURE_DEBOUNCE_MS = 200L
+        const val THREAD_JOIN_TIMEOUT_MS = 500L
     }
 
     private fun vec(v: FloatArray) =
