@@ -349,32 +349,44 @@ class UkfFusionEngine(
 
     override fun updateGnss(fix: GnssFix): UpdateOutcome = synchronized(lock) {
         val useVelocity = fix.hasVelocity
-        val m = if (useVelocity) 6 else 3
 
-        val H = Matrix.zeros(m, STATE_DIM)
-        H[0, POSITION_INDEX] = 1.0
-        H[1, POSITION_INDEX + 1] = 1.0
-        H[2, POSITION_INDEX + 2] = 1.0
+        // TEST FIX (test/heading-nudge-revert): position and velocity used to be gated
+        // as one combined 6-dim chi-squared test. Phone-grade GNSS Doppler velocity is
+        // much noisier than the position fix (multipath, low-speed course jitter), so a
+        // single noisy velocity component was dragging the whole fix - including a
+        // perfectly good position - past the gate together. That was measured driving
+        // rejection rates up near 60%, which fired the 3-consecutive-rejection
+        // anti-divergence reset below almost constantly, and each reset's raw velocity
+        // overwrite was the source of the residual mild heading zigzag after the first
+        // fix. Gating position and velocity independently lets a noisy velocity sample
+        // get rejected on its own without vetoing a trustworthy position fix.
+        val sqrtRSplit = gnssSqrtNoise(fix, useVelocity)
+
+        val hPos = Matrix.zeros(3, STATE_DIM)
+        hPos[0, POSITION_INDEX] = 1.0
+        hPos[1, POSITION_INDEX + 1] = 1.0
+        hPos[2, POSITION_INDEX + 2] = 1.0
+        val posInnovation = doubleArrayOf(
+            fix.position.north - nominal.position.x,
+            fix.position.east - nominal.position.y,
+            fix.position.down - nominal.position.z,
+        )
+        val sqrtRPos = Matrix.diagonal(doubleArrayOf(sqrtRSplit[0, 0], sqrtRSplit[1, 1], sqrtRSplit[2, 2]))
+        var outcome = updateLinear(hPos, posInnovation, sqrtRPos, config.gnss.gateConfidence)
 
         if (useVelocity) {
-            H[3, VELOCITY_INDEX] = 1.0
-            H[4, VELOCITY_INDEX + 1] = 1.0
-            H[5, VELOCITY_INDEX + 2] = 1.0
+            val hVel = Matrix.zeros(3, STATE_DIM)
+            hVel[0, VELOCITY_INDEX] = 1.0
+            hVel[1, VELOCITY_INDEX + 1] = 1.0
+            hVel[2, VELOCITY_INDEX + 2] = 1.0
+            val velInnovation = doubleArrayOf(
+                fix.velocityNed.x - nominal.velocity.x,
+                fix.velocityNed.y - nominal.velocity.y,
+                fix.velocityNed.z - nominal.velocity.z,
+            )
+            val sqrtRVel = Matrix.diagonal(doubleArrayOf(sqrtRSplit[3, 3], sqrtRSplit[4, 4], sqrtRSplit[5, 5]))
+            updateLinear(hVel, velInnovation, sqrtRVel, config.gnss.gateConfidence)
         }
-
-        val innovation = DoubleArray(m)
-        innovation[0] = fix.position.north - nominal.position.x
-        innovation[1] = fix.position.east - nominal.position.y
-        innovation[2] = fix.position.down - nominal.position.z
-
-        if (useVelocity) {
-            innovation[3] = fix.velocityNed.x - nominal.velocity.x
-            innovation[4] = fix.velocityNed.y - nominal.velocity.y
-            innovation[5] = fix.velocityNed.z - nominal.velocity.z
-        }
-
-        val sqrtR = gnssSqrtNoise(fix, useVelocity)
-        var outcome = updateLinear(H, innovation, sqrtR, config.gnss.gateConfidence)
 
         if (outcome == UpdateOutcome.Applied) {
             diagnostics.gnssApplied++
