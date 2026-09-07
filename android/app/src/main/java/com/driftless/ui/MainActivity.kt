@@ -305,7 +305,7 @@ class MainActivity : AppCompatActivity() {
                             // Feed sample to TFLite Velocity Model context window at 10 Hz (100 ms).
                             // The model expects 80 samples over 8s of driving context; feeding at 400 Hz shrinks context to 0.2s.
                             val nowNanos = sample.timestampNanos
-                            if (lastVelocityModelNanos == 0L || (nowNanos - lastVelocityModelNanos) >= 95_000_000L) {
+                            if (lastVelocityModelNanos == 0L || (nowNanos - lastVelocityModelNanos) >= 100_000_000L) {
                                 val dtSec = if (lastVelocityModelNanos == 0L) 0.1 else (nowNanos - lastVelocityModelNanos) / 1e9
                                 lastVelocityModelNanos = nowNanos
                                 velocityModel.addSample(
