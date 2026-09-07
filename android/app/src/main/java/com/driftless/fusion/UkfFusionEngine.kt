@@ -723,7 +723,25 @@ class UkfFusionEngine(
         sigmas[2] = vertical * inflation
 
         if (useVelocity) {
-            val speed = max(fix.speedAccuracyMps, p.minSpeedAccuracyMps) * inflation
+            // TEST FIX (test/heading-nudge-revert): phone GNSS chips are frequently
+            // overconfident near standstill - ground-reflection multipath at an
+            // intersection can produce a smoothly-drifting several-m/s ghost Doppler
+            // velocity with a *low* self-reported speedAccuracyMps (observed sigma
+            // ~0.6-0.9 while the car was stationary at a light, next to a genuinely
+            // accurate position fix). A raw speed-magnitude floor can't tell that
+            // apart from genuine slow driving (the ghost readings ranged up to
+            // 6-9 m/s in practice), so distrust is keyed off disagreement with what
+            // the filter already believes instead: if we've already established a
+            // near-standstill belief (from IMU-integrated velocity across prior
+            // fixes) and a new fix suddenly claims several m/s, that mismatch is the
+            // actual signature of a ghost reading - not genuine acceleration from
+            // rest, which the IMU would already be tracking upward in nominal.velocity
+            // too. Exempt the very first fix (no prior belief to check against).
+            val reportedSpeed = fix.velocityNed.norm()
+            val priorSpeed = nominal.velocity.norm()
+            val ghostVelocitySuspect = lastGnssAppliedNanos != 0L && priorSpeed < 1.0 && reportedSpeed > 2.0
+            val lowSpeedFloor = if (ghostVelocitySuspect) (reportedSpeed - priorSpeed) * 0.5 else 0.0
+            val speed = (max(fix.speedAccuracyMps, p.minSpeedAccuracyMps) + lowSpeedFloor) * inflation
             sigmas[3] = speed
             sigmas[4] = speed
             // Android GNSS only reports 2D horizontal speed; down velocity is pseudo-zero.
