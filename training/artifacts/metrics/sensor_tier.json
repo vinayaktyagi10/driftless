@@ -203,6 +203,7 @@
       }
     ]
   },
+  "ckpt": "tcn_best.pt",
   "routes": [
     "S/S1",
     "S/S4"

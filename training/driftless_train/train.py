@@ -91,6 +91,7 @@ class FitConfig:
     weight_decay: float = 1e-4
     width: int = 48
     device: str = "auto"
+    seed: int = 0
 
 
 def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
@@ -110,6 +111,14 @@ def fit(ds_tr, ds_va, n_channels: int, cfg: FitConfig,
     stats written to disk would then disagree with the ones baked into the
     exported graph.
     """
+    # Seed BEFORE the model is constructed: weight init and DataLoader
+    # shuffling both draw from torch's global RNG. Without this a retrain does
+    # not reproduce -- measured on the test split, an identical 40-epoch recipe
+    # gave 34.68 m at a 30 s blackout against the shipped model's 31.39 m,
+    # purely from the seed. The shipped checkpoint predates this and so cannot
+    # be reproduced exactly; that is why it is kept as a committed binary.
+    torch.manual_seed(cfg.seed)
+
     if stats is None:
         stats = compute_stats(ds_tr)
     device = pick_device(cfg.device)
@@ -165,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="output interval, samples")
     ap.add_argument("--stride", type=int, default=STRIDE_TRAIN)
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="torch seed for weight init and batch order; without "
+                         "it a retrain does not reproduce")
     ap.add_argument("--proc-dir", type=Path, default=PROC_DIR)
     ap.add_argument("--min-coupling", type=float, default=0.0,
                     help="drop TRAIN runs whose phone/vehicle coupling is below "
@@ -235,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = FitConfig(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
                     weight_decay=args.weight_decay, width=args.width,
-                    device=args.device)
+                    device=args.device, seed=args.seed)
 
     log_path = METRIC_DIR / f"train_log{tag}.csv"
     f = log_path.open("w", newline="")
@@ -279,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
                     "channel_indices": (None if chan_idx is None
                                         else chan_idx.tolist()),
                     "rotate_aug": args.rotate_aug, "width": args.width,
-                    "lowpass_aug": list(args.lowpass_aug),
+                    "lowpass_aug": list(args.lowpass_aug), "seed": args.seed,
                     "epoch": epoch}, ckpt_path)
 
     out = fit(ds_tr, ds_va, len(channels), cfg, on_epoch=on_epoch,

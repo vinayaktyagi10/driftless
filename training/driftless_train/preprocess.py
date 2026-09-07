@@ -116,8 +116,24 @@ def _add_time(df: pd.DataFrame) -> pd.DataFrame:
 # The accelerometer IS in (X, Y, Z) with Z vertical: its mean is ~(0.04, 0.06,
 # 9.85) with |mean| = 9.85, i.e. gravity on Z.
 #
-# The X/Y assignment between the two remaining gyro columns is not resolved and
-# does not need to be: it enters only through gyro_horiz, which is a magnitude.
+# The X/Y assignment between the two remaining gyro columns is not resolved.
+# It very nearly does not matter, but the reason this comment used to give was
+# wrong, so state it properly: swapping X and Y leaves acc_* and gyro_horiz
+# exactly unchanged (both are magnitudes), and would leave gyro_vert unchanged
+# too IF gravity were exactly (0, 0, 1). It is not -- the phone sits a degree or
+# two off level -- so g_hat has small X/Y components and the swap moves
+# gyro_vert by up to 0.079 rad/s on real data. The effect on what we care about
+# is still negligible: correlation of gyro_vert with the vehicle's own yaw rate
+# is 0.9487 under this assignment and 0.9486 under the swap, measured over 8
+# runs, with the two winning 4 runs each. So the choice is arbitrary, as claimed
+# -- just not exactly free, and not for the reason previously given.
+#
+# It does NOT affect raw feature channels 3 and 5. Those are fixed by
+# IMU_CHANNELS (column order), not by this tuple. Consumers reimplementing the
+# feature vector must map physical x/y/z to slots 3/5/4 -- see
+# augment.GYRO_XYZ_IDX. Two separate ports have already got this wrong, in two
+# different ways, so assert it against real reference values rather than
+# reading this comment and hoping.
 GYRO_XYZ_COLUMNS: tuple[str, str, str] = ("gyro_yaw", "gyro_roll", "gyro_pitch")
 
 

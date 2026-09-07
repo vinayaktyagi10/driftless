@@ -41,8 +41,13 @@ normalise on either side.
 
 These two model files are **not committed** -- `.gitignore` keeps binaries out
 of the tree except the single canonical copy under
-`training/artifacts/models/`. A fresh clone will NOT have them, and a build that
-expects them will fail with a missing-asset error.
+`training/artifacts/models/`. A fresh clone will NOT have them.
+
+**What actually happens without them is worse than a failure: nothing.** The
+edge engine's `test_velocity_model` SKIPS when the `.onnx` is absent, so `ctest`
+reports success with the model never loaded, and a CI gate reading the exit code
+scores that as coverage of the inference path. Treat a green run as meaningless
+for this model unless you have confirmed the file was present.
 
 To place them:
 

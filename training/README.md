@@ -205,8 +205,8 @@ a real car.
 ## Model
 
 A small **dilated causal TCN**: 14 input channels × **80 samples (8 s of context
-at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.118 ms/window**
-(ONNX) and **0.067 ms/window** (TFLite) on laptop CPU. Receptive field 63
+at 10 Hz)** → three outputs. **38,499 parameters**; inference **0.116 ms/window**
+(ONNX) and **0.068 ms/window** (TFLite) on laptop CPU. Receptive field 63
 samples, covering the context.
 
 **Context length and output interval are deliberately decoupled** — the two
@@ -561,10 +561,16 @@ training/artifacts/
   time-varying. `artifacts/metrics/eval_summary.json` has the error
   distributions to set measurement noise from.
 - **Roles 04–05 (edge engine):** same weights via
-  `training/artifacts/models/tcn_speed_heading.onnx` (committed, with its
-  `.onnx.data` sidecar — keep the two together), **NCW** layout `(1, 14, 80)`,
-  verified to match PyTorch to 9.7e-7 relative. Latency headroom is large
-  (0.118 ms/window on laptop CPU).
+  `training/artifacts/models/tcn_speed_heading.onnx` — one self-contained
+  218.3 KB file. There is **no `.onnx.data` sidecar**; an earlier
+  export split the weights out into one, and copying only the `.onnx` then
+  failed at load time, so the export now forces everything inline. If you see
+  a `.onnx.data` anywhere, it is stale — delete it. **NCW** layout
+  `(1, 14, 80)`, note the transpose against the Android side's NWC. Verified to
+  match PyTorch to 2.3e-06 relative on 64 real windows. Latency
+  headroom is large (0.116 ms/window on laptop CPU).
+  `--copy-to-consumers` places it, plus `MODEL_CONTRACT.md` and the golden
+  layout fixture, in `edge-engine/models/`.
 - **Role 06 (writeup):** start from `training/artifacts/ROUND1_EVIDENCE.md`,
   which is generated from the artifacts and has every number traceable to a
   file. `artifacts/metrics/dataset_audit.md` for the data section,
