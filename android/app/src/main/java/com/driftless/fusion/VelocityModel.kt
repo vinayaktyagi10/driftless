@@ -250,7 +250,22 @@ class VelocityModel(context: Context? = null) {
         const val GRAVITY_TAU_S = 10.0f
         const val MIN_STATIONARY_SAMPLES = 10 // 1s at 10 Hz allows immediate standstill detection
         const val STATIONARY_WINDOW_SIZE = 20 // 2s at 10 Hz
-        const val STATIONARY_STD_ACC_MAX = 0.25
+        // Measured over all 51 held-out IO-VNBD runs (983,401 windows), with
+        // the mean-gravity gate applied. The accel threshold is what controls
+        // false positives; the gyro one mostly controls recall:
+        //
+        //   std_acc  std_gyro   fires while driving   catches standstill
+        //     0.25     0.045          2.993%                94.8%
+        //     0.15     0.045          0.366%                85.2%
+        //     0.15     0.010          0.092%                56.0%
+        //
+        // At 0.25 the worst false positive was a genuine 31.0 m/s (112 km/h)
+        // read as parked, which hands the filter a hard zero at motorway speed
+        // -- the failure this detector was written to remove. 0.15 keeps most
+        // of the recall and drops the worst case to 14.4 m/s. Do not loosen the
+        // accel threshold without re-measuring; loosening the gyro one is much
+        // cheaper if more recall is needed.
+        const val STATIONARY_STD_ACC_MAX = 0.15
         const val STATIONARY_STD_GYRO_MAX = 0.045
         const val STATIONARY_MEAN_GRAVITY_TOL = 0.8
         const val MODEL_PATH = "models/velocity_model.tflite"
