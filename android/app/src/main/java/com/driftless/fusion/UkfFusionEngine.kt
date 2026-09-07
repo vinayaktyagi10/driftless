@@ -391,10 +391,12 @@ class UkfFusionEngine(
                     position = Vec3(fix.position.north, fix.position.east, fix.position.down),
                     velocity = if (useVelocity) fix.velocityNed else Vec3(0.0, 0.0, 0.0),
                 )
-                if (useVelocity && fix.velocityNed.norm() > 1.5) {
-                    val courseRad = atan2(fix.velocityNed.y, fix.velocityNed.x)
-                    alignHeading(courseRad)
-                }
+                // TEST REVERT (test/heading-nudge-revert): dropped the alignHeading() snap
+                // to raw instantaneous GNSS course here. With rejection runs of >=3 firing
+                // almost every fix on real data (~61% rejection rate), this was yanking
+                // heading straight to noisy atan2(vy,vx) every few hundred ms - suspected
+                // dominant cause of the sawtooth zigzag on straight-line driving. Position
+                // and velocity re-anchor kept; heading is left to the filter/NHC/gyro.
                 val resetSigmas = DoubleArray(STATE_DIM)
                 val posUncert = max(fix.horizontalAccuracyM, 5.0)
                 val velUncert = if (useVelocity) max(fix.speedAccuracyMps, 1.0) else 1.0
