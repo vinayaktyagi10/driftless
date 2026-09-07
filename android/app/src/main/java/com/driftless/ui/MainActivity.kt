@@ -8,6 +8,8 @@ import android.hardware.SensorManager
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -37,7 +39,9 @@ import com.driftless.sensors.GnssSampler
 import com.driftless.sensors.ImuFrame
 import com.driftless.sensors.ImuSampler
 import com.driftless.settings.AppSettings
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -74,17 +78,29 @@ class MainActivity : AppCompatActivity() {
 
     private var samplingJob: Job? = null
 
+    // Off-loads UKF propagation/updates and TFLite inference from Main, onto a
+    // single dedicated worker thread -- same pattern as ImuSampler's own
+    // HandlerThread. Single-threaded because UkfFusionEngine's synchronized(lock)
+    // already forces those calls to be serialized against each other; a shared
+    // pool would just add contention without adding concurrency.
+    private lateinit var fusionThread: HandlerThread
+    private lateinit var fusionDispatcher: CoroutineDispatcher
+
     // Live diagnostics
-    private var imuCount = 0L
+    // @Volatile: written on fusionDispatcher (loop 1), read from Main by the
+    // diagnostics ticker (loop 5).
+    @Volatile private var imuCount = 0L
     private var imuCountAtLastTick = 0L
     private var lastTickNanos = 0L
     private var measuredHz = 0.0
-    private var latestFrame: ImuFrame? = null
+    @Volatile private var latestFrame: ImuFrame? = null
     private var gnssCount = 0L
-    private var latestFix: GnssFix? = null
+    // @Volatile: written on Main (loop 2, the GNSS loop), read on
+    // fusionDispatcher (loop 3, the aiding loop's staleness gate).
+    @Volatile private var latestFix: GnssFix? = null
     private var diagnosticsExpanded = true
     private var anchorLogged = false
-    private var lastFixRealtimeNanos = 0L
+    @Volatile private var lastFixRealtimeNanos = 0L
     private var lastVelocityModelNanos = 0L
 
     // Filter output
@@ -92,12 +108,14 @@ class MainActivity : AppCompatActivity() {
     private var latestFused: FusedPosition? = null
 
     // Blackout simulation state
-    private var isSimulatedBlackout = false
-    private var blackoutStartNanos = 0L
+    // @Volatile on the four below: written on Main by the blackout button's
+    // click listener, read on fusionDispatcher (loop 3, the aiding loop).
+    @Volatile private var isSimulatedBlackout = false
+    @Volatile private var blackoutStartNanos = 0L
     private var blackoutDistanceM = 0.0
     private var lastBlackoutFusedNanos = 0L
-    private var blackoutEntrySpeed: Double = 0.0
-    private var wasStationaryBeforeBlackout: Boolean = false
+    @Volatile private var blackoutEntrySpeed: Double = 0.0
+    @Volatile private var wasStationaryBeforeBlackout: Boolean = false
 
     private enum class LocationAccess {
         Granted,
@@ -127,6 +145,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        fusionThread = HandlerThread("fusion-worker").apply { start() }
+        fusionDispatcher = Handler(fusionThread.looper).asCoroutineDispatcher()
 
         settings = AppSettings(this)
         imuSampler = ImuSampler(this)
@@ -205,6 +226,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // Stop the thread before closing the interpreter it may be mid-inference
+        // on -- repeatOnLifecycle cancellation only takes effect at a suspension
+        // point, and Interpreter.run() is blocking, not suspending, so closing
+        // first risks a native use-after-free.
+        fusionThread.quitSafely()
+        fusionThread.join(THREAD_JOIN_TIMEOUT_MS)
         velocityModel.close()
         super.onDestroy()
     }
@@ -294,8 +321,10 @@ class MainActivity : AppCompatActivity() {
                 logger.logBlackout(isSimulatedBlackout, SystemClock.elapsedRealtimeNanos())
 
                 try {
-                    // 1. IMU Propagation Loop (200 - 500 Hz)
-                    launch {
+                    // 1. IMU Propagation Loop (200 - 500 Hz). Runs on fusionDispatcher --
+                    // engine.predict() is a full 15-state SR-UKF step (sigma points, QR,
+                    // Cholesky updates) and running it on Main at IMU rate is an ANR risk.
+                    launch(fusionDispatcher) {
                         imuSampler.frames(settings.sensorDelay).collect { frame ->
                             imuCount++
                             latestFrame = frame
@@ -372,8 +401,10 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // 3. TFLite Velocity Model & NHC Aiding Loop (10 Hz)
-                    launch {
+                    // 3. TFLite Velocity Model & NHC Aiding Loop (10 Hz). Same
+                    // fusionDispatcher as loop 1 -- TFLite inference plus another
+                    // UKF measurement update, same reason to keep off Main.
+                    launch(fusionDispatcher) {
                         while (true) {
                             try {
                                 delay(100)
@@ -686,6 +717,7 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val DIAG_TAG = "DriftlessDiag"
         const val MAP_GESTURE_DEBOUNCE_MS = 200L
+        const val THREAD_JOIN_TIMEOUT_MS = 500L
     }
 
     private fun vec(v: FloatArray) =
