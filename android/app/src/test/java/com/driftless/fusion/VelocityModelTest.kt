@@ -91,4 +91,55 @@ class VelocityModelTest {
 
         assertFalse("Cruising car with road vibrations must NOT be classified as stationary", model.isStationary())
     }
+
+    @Test
+    fun testEarlyStandstillDetectionWithTenSamples() {
+        val model = VelocityModel()
+        val accel = Vec3(0.0, 0.0, 9.80665)
+        val gyro = Vec3(0.0, 0.0, 0.0)
+
+        for (i in 0 until 9) {
+            model.addSample(accel, gyro)
+        }
+        assertFalse("Should not be stationary under 10 samples", model.isStationary())
+
+        model.addSample(accel, gyro) // 10th sample
+        assertTrue("Must be stationary with 10 standstill samples", model.isStationary())
+    }
+
+    @Test
+    fun testStationaryWithHandTremorNoise() {
+        val model = VelocityModel()
+        val rng = Random(123)
+
+        // Hand tremor: std(gyro) ~ 0.02 rad/s, std(accel) ~ 0.08 m/s^2
+        for (i in 0 until 20) {
+            val ax = rng.nextDouble(-0.08, 0.08)
+            val ay = rng.nextDouble(-0.08, 0.08)
+            val az = rng.nextDouble(-0.08, 0.08)
+            val gx = rng.nextDouble(-0.025, 0.025)
+            val gy = rng.nextDouble(-0.025, 0.025)
+            val gz = rng.nextDouble(-0.025, 0.025)
+
+            model.addSample(Vec3(ax, ay, 9.80665 + az), Vec3(gx, gy, gz))
+        }
+
+        assertTrue("Hand-held stationary phone must be classified as stationary", model.isStationary())
+    }
+
+    @Test
+    fun testPredictReturnsZeroSpeedWhenStationaryEarly() {
+        val model = VelocityModel()
+        val accel = Vec3(0.0, 0.0, 9.80665)
+        val gyro = Vec3(0.0, 0.0, 0.0)
+
+        for (i in 0 until 15) {
+            model.addSample(accel, gyro)
+        }
+        // 15 samples: buffer is not full (isReady = false), but standstill is detected
+        assertFalse(model.isReady)
+        val pred = model.predict()
+        assertNotNull(pred)
+        assertEquals(0.0f, pred!!.speedMps, 1e-4f)
+    }
 }

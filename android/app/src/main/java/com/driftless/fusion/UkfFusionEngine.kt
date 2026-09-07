@@ -6,6 +6,7 @@ import com.driftless.math.Matrix
 import com.driftless.math.So3
 import com.driftless.math.SqrtKalman
 import com.driftless.math.conjugate
+import com.driftless.math.cross
 import com.driftless.math.dot
 import com.driftless.math.minus
 import com.driftless.math.norm
@@ -122,7 +123,10 @@ class UkfFusionEngine(
     private var lastEmittedNanos = 0L
 
     private var isOrientationInitialized = false
+    var isHeadingInitialized: Boolean = false
+        private set
     private var consecutiveGnssRejections = 0
+    private var consecutiveVelocityModelRejections = 0
     private var lastGnssAppliedNanos = 0L
 
     init {
@@ -150,6 +154,46 @@ class UkfFusionEngine(
             val qAlign = So3.fromTwoVectors(from = downBody, to = Vec3(0.0, 0.0, 1.0))
             nominal = nominal.copy(orientation = qAlign)
             isOrientationInitialized = true
+        }
+    }
+
+    /**
+     * Aligns filter attitude yaw to the specified heading in radians clockwise from North,
+     * while strictly preserving body-measured gravity leveling (Down in NED).
+     */
+    fun alignHeading(headingRad: Double) {
+        val downNed = nominal.orientation.rotate(Vec3(0.0, 0.0, 1.0)).normalized()
+        val targetForwardHoriz = Vec3(kotlin.math.cos(headingRad), kotlin.math.sin(headingRad), 0.0)
+        val forwardNed = (targetForwardHoriz - downNed * targetForwardHoriz.dot(downNed)).normalized()
+        val rightNed = downNed.cross(forwardNed).normalized()
+        val q = So3.fromRotationMatrix(forwardNed, rightNed, downNed)
+        nominal = nominal.copy(orientation = q)
+        isHeadingInitialized = true
+    }
+
+    /**
+     * Aligns filter attitude using accelerometer gravity vector (Down) and magnetometer (North).
+     * Provides an initial compass heading when the vehicle is stationary before GPS velocity is available.
+     */
+    fun alignAttitudeWithCompass(accel: Vec3, mag: Vec3) {
+        val aNorm = accel.norm()
+        val mNorm = mag.norm()
+        if (aNorm in 5.0..15.0 && mNorm in 10.0..100.0) {
+            val downBody = Vec3(-accel.x, -accel.y, -accel.z).normalized()
+            val eastCross = downBody.cross(mag)
+            val eastNorm = eastCross.norm()
+            if (eastNorm < 1e-3) return
+            val eastBody = (eastCross * (1.0 / eastNorm)).normalized()
+            val northBody = eastBody.cross(downBody).normalized()
+
+            val c0 = Vec3(northBody.x, eastBody.x, downBody.x)
+            val c1 = Vec3(northBody.y, eastBody.y, downBody.y)
+            val c2 = Vec3(northBody.z, eastBody.z, downBody.z)
+
+            val q = So3.fromRotationMatrix(c0, c1, c2)
+            nominal = nominal.copy(orientation = q)
+            isOrientationInitialized = true
+            isHeadingInitialized = true
         }
     }
 
@@ -254,10 +298,10 @@ class UkfFusionEngine(
                 it.copy(orientation = it.orientation.normalized())
             }
 
-            // Bound velocity to maximum plausible vehicle dynamics (60 m/s ~ 216 km/h)
+            // Bound velocity to maximum plausible vehicle dynamics (25 m/s ~ 90 km/h in dead reckoning)
             val currentSpeed = nominal.velocity.norm()
-            if (currentSpeed > 60.0) {
-                nominal = nominal.copy(velocity = nominal.velocity * (60.0 / currentSpeed))
+            if (currentSpeed > 25.0) {
+                nominal = nominal.copy(velocity = nominal.velocity * (25.0 / currentSpeed))
             }
 
             sqrtCovariance = newSqrtCov
@@ -313,6 +357,10 @@ class UkfFusionEngine(
                     position = Vec3(fix.position.north, fix.position.east, fix.position.down),
                     velocity = if (useVelocity) fix.velocityNed else Vec3(0.0, 0.0, 0.0),
                 )
+                if (useVelocity && fix.velocityNed.norm() > 1.5) {
+                    val courseRad = atan2(fix.velocityNed.y, fix.velocityNed.x)
+                    alignHeading(courseRad)
+                }
                 val resetSigmas = DoubleArray(STATE_DIM)
                 val posUncert = max(fix.horizontalAccuracyM, 5.0)
                 val velUncert = if (useVelocity) max(fix.speedAccuracyMps, 1.0) else 1.0
@@ -331,6 +379,26 @@ class UkfFusionEngine(
                 outcome = UpdateOutcome.Applied
                 diagnostics.gnssApplied++
                 lastGnssAppliedNanos = fix.timestampNanos
+            }
+        }
+
+        // Heading / course alignment from GNSS ground track
+        if (useVelocity && fix.velocityNed.norm() > 1.5) {
+            val courseRad = atan2(fix.velocityNed.y, fix.velocityNed.x)
+            if (!isHeadingInitialized) {
+                alignHeading(courseRad)
+            } else {
+                val forwardNed = nominal.orientation.rotate(Vec3(1.0, 0.0, 0.0))
+                val currentHdg = atan2(forwardNed.y, forwardNed.x)
+                var diff = (courseRad - currentHdg + Math.PI) % (2.0 * Math.PI) - Math.PI
+                if (diff < -Math.PI) diff += 2.0 * Math.PI
+                if (kotlin.math.abs(diff) < Math.toRadians(45.0)) {
+                    nominal = nominal.copy(
+                        orientation = So3.boxPlus(nominal.orientation, Vec3(0.0, 0.0, diff * 0.25))
+                    )
+                } else if (outcome == UpdateOutcome.Applied) {
+                    alignHeading(courseRad)
+                }
             }
         }
 
@@ -371,11 +439,8 @@ class UkfFusionEngine(
         val p = config.nonHolonomic
         val speed = nominal.velocity.norm()
         if (speed < p.minSpeedMps) {
-            val outcome = updateZeroVelocity(0.05)
-            if (outcome == UpdateOutcome.Applied) {
-                diagnostics.nhcApplied++
-            }
-            return outcome
+            diagnostics.nhcSkipped++
+            return UpdateOutcome.Skipped
         }
 
         val h = { s: NavState ->
@@ -396,9 +461,10 @@ class UkfFusionEngine(
 
     fun updateVelocityModel(predictedForwardSpeedMps: Double): UpdateOutcome = synchronized(lock) {
         val p = config.velocityModel
-        val isStandstill = predictedForwardSpeedMps <= 0.01
+        val isStandstill = predictedForwardSpeedMps <= 0.05
 
         if (isStandstill) {
+            consecutiveVelocityModelRejections = 0
             val outcome = updateZeroVelocity(0.05)
             if (outcome == UpdateOutcome.Applied) {
                 diagnostics.velocityModelApplied++
@@ -418,8 +484,30 @@ class UkfFusionEngine(
 
         if (outcome == UpdateOutcome.Applied) {
             diagnostics.velocityModelApplied++
+            consecutiveVelocityModelRejections = 0
         } else if (outcome == UpdateOutcome.RejectedByGate) {
             diagnostics.velocityModelRejected++
+            consecutiveVelocityModelRejections++
+
+            // Anti-divergence safeguard: if the filter velocity drifts away from the velocity model prediction
+            // (e.g. 2 consecutive rejections, or a divergence > 3.0 m/s), pull the forward velocity
+            // back to the model's estimate to prevent gravity tilt from accelerating to runaway speeds.
+            val currentForwardSpeed = bodyVelocity(nominal).x
+            val divergence = kotlin.math.abs(currentForwardSpeed - correctedSpeedMps)
+            if (consecutiveVelocityModelRejections >= 2 || divergence > 3.0) {
+                val forwardNed = nominal.orientation.rotate(Vec3(1.0, 0.0, 0.0))
+                nominal = nominal.copy(velocity = forwardNed * correctedSpeedMps)
+                val velUncert = max(p.sigmaMps, 1.5)
+                val resetSigmas = DoubleArray(STATE_DIM)
+                for (k in 0 until STATE_DIM) {
+                    resetSigmas[k] = sqrtCovariance[k, k]
+                }
+                resetSigmas[VELOCITY_INDEX] = velUncert
+                resetSigmas[VELOCITY_INDEX + 1] = velUncert
+                resetSigmas[VELOCITY_INDEX + 2] = velUncert
+                sqrtCovariance = Matrix.diagonal(resetSigmas)
+                consecutiveVelocityModelRejections = 0
+            }
         }
         outcome
     }
@@ -591,6 +679,10 @@ class UkfFusionEngine(
 
     override fun state(): NavState = synchronized(lock) { nominal }
 
+    fun resetPosition(newPos: Vec3 = Vec3(0.0, 0.0, 0.0)) = synchronized(lock) {
+        nominal = nominal.copy(position = newPos)
+    }
+
     fun covarianceSqrt(): Matrix = synchronized(lock) { sqrtCovariance }
 
     fun covariance(): Matrix = synchronized(lock) { sqrtCovariance * sqrtCovariance.transpose() }
@@ -622,10 +714,12 @@ class UkfFusionEngine(
             1.0f
         } else {
             val elapsedSinceGnssSec = (nowNanos - lastGnssAppliedNanos) / NANOS_PER_SECOND
-            if (elapsedSinceGnssSec <= 2.0) {
+            if (elapsedSinceGnssSec in 0.0..2.0) {
                 1.0f
-            } else {
+            } else if (elapsedSinceGnssSec > 2.0 && elapsedSinceGnssSec < 3600.0) {
                 (1.0 - (elapsedSinceGnssSec - 2.0) / 58.0).coerceIn(0.05, 0.95).toFloat()
+            } else {
+                1.0f
             }
         }
 

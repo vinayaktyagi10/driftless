@@ -26,12 +26,7 @@ import org.osmdroid.views.overlay.Polyline
  */
 class TrackRenderer(private val map: MapView) {
 
-    private val aided = Polyline(map).apply {
-        outlinePaint.color = Color.parseColor("#2E7DF7")
-        outlinePaint.strokeWidth = 8f
-    }
-
-    private val deadReckoned = Polyline(map).apply {
+    private val routeLine = Polyline(map).apply {
         outlinePaint.color = Color.parseColor("#F2A93B")
         outlinePaint.strokeWidth = 8f
     }
@@ -54,24 +49,15 @@ class TrackRenderer(private val map: MapView) {
         // Required by the OSM tile usage policy, and the map is on screen in
         // front of judges, so it is not optional in either sense.
         map.overlays.add(CopyrightOverlay(map.context))
-        map.overlays.add(aided)
-        map.overlays.add(deadReckoned)
+        map.overlays.add(routeLine)
         map.overlays.add(marker)
         map.controller.setZoom(DEFAULT_ZOOM)
     }
 
     private var lastDrawn: GeoPoint? = null
-    private var lastCoasting: Boolean? = null
 
     /**
-     * Moves the marker to the fused position and extends whichever track the
-     * engine is currently feeding.
-     *
-     * Which track is chosen by [FusedPosition.confidence], which is the field
-     * the contract set aside for exactly this. It holds at 1.0 while the
-     * position is no worse than the fix it came from and decays once the engine
-     * is coasting beyond that, so during normal 1 Hz driving everything lands on
-     * [aided] and the orange line appears only during a real outage.
+     * Moves the marker to the fused position and extends the route track.
      *
      * Points closer than [MIN_SEGMENT_M] to the previous one are dropped from
      * the polyline, because a parked vehicle still produces a position ten times
@@ -82,25 +68,11 @@ class TrackRenderer(private val map: MapView) {
      */
     fun addFusedPoint(fused: FusedPosition) {
         val point = GeoPoint(fused.lat, fused.lon)
-        val coasting = fused.confidence < 1f
-        val line = if (coasting) deadReckoned else aided
-
-        val handover = lastCoasting != null && lastCoasting != coasting
-        if (handover) {
-            // Bridge the two polylines at the changeover, or the orange track
-            // appears to begin somewhere the blue one never reached and the
-            // divergence on screen reads as a jump rather than a departure.
-            lastDrawn?.let { line.addPoint(it) }
-        }
-
         val previous = lastDrawn
-        if (handover || previous == null ||
-            previous.distanceToAsDouble(point) >= MIN_SEGMENT_M
-        ) {
-            line.addPoint(point)
+        if (previous == null || previous.distanceToAsDouble(point) >= MIN_SEGMENT_M) {
+            routeLine.addPoint(point)
             lastDrawn = point
         }
-        lastCoasting = coasting
 
         marker.position = point
         marker.rotation = -fused.headingDegrees
@@ -127,9 +99,7 @@ class TrackRenderer(private val map: MapView) {
 
     fun clear() {
         lastDrawn = null
-        lastCoasting = null
-        aided.setPoints(emptyList())
-        deadReckoned.setPoints(emptyList())
+        routeLine.setPoints(emptyList())
         map.invalidate()
     }
 

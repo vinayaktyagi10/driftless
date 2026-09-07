@@ -141,4 +141,27 @@ object So3 {
         val invS = 1.0 / s
         return Quaternion(0.5 * s, k.x * invS, k.y * invS, k.z * invS).normalized()
     }
+
+    /**
+     * Converts a 3x3 orthonormal rotation matrix with columns c0, c1, c2 to a unit quaternion.
+     */
+    fun fromRotationMatrix(c0: Vec3, c1: Vec3, c2: Vec3): Quaternion {
+        val m00 = c0.x; val m01 = c1.x; val m02 = c2.x
+        val m10 = c0.y; val m11 = c1.y; val m12 = c2.y
+        val m20 = c0.z; val m21 = c1.z; val m22 = c2.z
+        val trace = m00 + m11 + m22
+        return if (trace > 0.0) {
+            val s = 0.5 / sqrt(trace + 1.0)
+            Quaternion(0.25 / s, (m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s).normalized()
+        } else if (m00 > m11 && m00 > m22) {
+            val s = 2.0 * sqrt(1.0 + m00 - m11 - m22)
+            Quaternion((m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s).normalized()
+        } else if (m11 > m22) {
+            val s = 2.0 * sqrt(1.0 + m11 - m00 - m22)
+            Quaternion((m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s).normalized()
+        } else {
+            val s = 2.0 * sqrt(1.0 + m22 - m00 - m11)
+            Quaternion((m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s).normalized()
+        }
+    }
 }

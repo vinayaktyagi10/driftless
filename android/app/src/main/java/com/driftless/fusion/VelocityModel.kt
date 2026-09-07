@@ -147,8 +147,8 @@ class VelocityModel(context: Context? = null) {
      * and std(|gyro|) < 0.01.
      */
     fun isStationary(): Boolean {
-        if (bufferCount < STATIONARY_WINDOW_SIZE) return false
-        val n = STATIONARY_WINDOW_SIZE
+        if (bufferCount < MIN_STATIONARY_SAMPLES) return false
+        val n = kotlin.math.min(bufferCount, STATIONARY_WINDOW_SIZE)
         var sumAcc = 0.0
         var sumGyro = 0.0
 
@@ -184,7 +184,8 @@ class VelocityModel(context: Context? = null) {
         val stdAcc = sqrt(varAcc / n)
         val stdGyro = sqrt(varGyro / n)
 
-        return stdAcc < STATIONARY_STD_ACC_MAX && stdGyro < STATIONARY_STD_GYRO_MAX
+        val gravityClose = kotlin.math.abs(meanAcc - 9.80665) < STATIONARY_MEAN_GRAVITY_TOL
+        return stdAcc < STATIONARY_STD_ACC_MAX && stdGyro < STATIONARY_STD_GYRO_MAX && gravityClose
     }
 
     /**
@@ -192,9 +193,6 @@ class VelocityModel(context: Context? = null) {
      * Returns null if buffer is not full or interpreter is unavailable.
      */
     fun predict(): Prediction? {
-        if (!isReady) return null
-        if (bufferCount < WINDOW_SIZE) return null
-
         if (isStationary()) {
             return Prediction(
                 speedMps = 0.0f,
@@ -202,6 +200,9 @@ class VelocityModel(context: Context? = null) {
                 dvMps = 0.0f,
             )
         }
+
+        if (!isReady) return null
+        if (bufferCount < WINDOW_SIZE) return null
 
         val interp = interpreter ?: return null
 
@@ -247,9 +248,11 @@ class VelocityModel(context: Context? = null) {
         const val WINDOW_SIZE = 80
         const val NUM_CHANNELS = 14
         const val GRAVITY_TAU_S = 10.0f
+        const val MIN_STATIONARY_SAMPLES = 10 // 1s at 10 Hz allows immediate standstill detection
         const val STATIONARY_WINDOW_SIZE = 20 // 2s at 10 Hz
-        const val STATIONARY_STD_ACC_MAX = 0.15
-        const val STATIONARY_STD_GYRO_MAX = 0.01
+        const val STATIONARY_STD_ACC_MAX = 0.25
+        const val STATIONARY_STD_GYRO_MAX = 0.045
+        const val STATIONARY_MEAN_GRAVITY_TOL = 0.8
         const val MODEL_PATH = "models/velocity_model.tflite"
         private const val TAG = "VelocityModel"
 

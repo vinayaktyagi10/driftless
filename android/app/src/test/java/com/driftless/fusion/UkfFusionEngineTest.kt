@@ -5,12 +5,15 @@ import com.driftless.mapmatch.HmmParams
 import com.driftless.mapmatch.RoadGraph
 import com.driftless.math.Matrix
 import com.driftless.math.So3
+import com.driftless.math.dot
 import com.driftless.math.minus
 import com.driftless.math.norm
 import com.driftless.math.plus
+import com.driftless.math.rotate
 import com.driftless.math.times
 import com.driftless.sensors.ImuSample
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Locale
@@ -379,6 +382,190 @@ class UkfFusionEngineTest {
         // Velocity should be strictly clamped to <= 60.0 m/s
         assertTrue("Speed must be clamped <= 60 m/s but was ${engine.state().velocity.norm()}",
             engine.state().velocity.norm() <= 60.001)
+    }
+
+    @Test
+    fun testNhcSkippedAtStandstillAndSlowSpeeds() {
+        val engine = UkfFusionEngine(
+            initialState = NavState(velocity = Vec3(1.2, 0.0, 0.0)) // speed 1.2 m/s < 2.0 m/s
+        )
+        val outcome = engine.updateNonHolonomic()
+        assertEquals(UpdateOutcome.Skipped, outcome)
+        assertEquals(1, engine.diagnostics.nhcSkipped)
+        assertEquals(0, engine.diagnostics.nhcApplied)
+        // Ensure velocity was not clamped to zero
+        assertTrue("Velocity should not be clamped to zero", engine.state().velocity.norm() > 1.0)
+    }
+
+    @Test
+    fun testHeadingAlignmentFromGnssVelocityCourse() {
+        val engine = UkfFusionEngine()
+        // Gravity leveling with stationary specific force
+        engine.alignGravity(Vec3(0.0, 0.0, -9.80665))
+        // Before driving, orientation forward is roughly North (0 deg)
+        val initialForward = engine.state().orientation.rotate(Vec3(1.0, 0.0, 0.0))
+        assertEquals(1.0, initialForward.x, 1e-3)
+        assertEquals(0.0, initialForward.y, 1e-3)
+
+        // Vehicle starts moving along Mansarovar Link Road: 40 deg azimuth East of North pulling away at 2.5 m/s (~9 km/h)
+        val hdgDeg = 40.0
+        val hdgRad = Math.toRadians(hdgDeg)
+        val speedMps = 2.5
+        val movingFix = GnssFix(
+            timestampNanos = 1_000_000_000L,
+            position = Position(0.0, 0.0, 0.0),
+            velocityNed = Vec3(speedMps * kotlin.math.cos(hdgRad), speedMps * kotlin.math.sin(hdgRad), 0.0),
+            hasVelocity = true,
+            horizontalAccuracyM = 2.0,
+            verticalAccuracyM = 4.0,
+            speedAccuracyMps = 0.1,
+            satellitesUsed = 14,
+        )
+
+        val outcome = engine.updateGnss(movingFix)
+        assertEquals(UpdateOutcome.Applied, outcome)
+        assertTrue(engine.isHeadingInitialized)
+
+        // Fused orientation forward vector in NED should now point along 40 deg
+        val alignedForward = engine.state().orientation.rotate(Vec3(1.0, 0.0, 0.0))
+        val estHdgDeg = (Math.toDegrees(kotlin.math.atan2(alignedForward.y, alignedForward.x)) + 360.0) % 360.0
+        assertEquals(40.0, estHdgDeg, 1.0)
+
+        // Non-holonomic update should now pass the gate cleanly because lateral velocity is ~0
+        val nhcOutcome = engine.updateNonHolonomic()
+        assertEquals(UpdateOutcome.Applied, nhcOutcome)
+        assertEquals(1, engine.diagnostics.nhcApplied)
+        assertEquals(0, engine.diagnostics.nhcRejected)
+    }
+
+    @Test
+    fun testAngledRoadBlackoutStabilityNoDeviation() {
+        val engine = UkfFusionEngine()
+        val hdgDeg = 40.0
+        val hdgRad = Math.toRadians(hdgDeg)
+        val speedMps = 15.0 // ~54 km/h
+        val dirNed = Vec3(kotlin.math.cos(hdgRad), kotlin.math.sin(hdgRad), 0.0)
+
+        // Provide initial GNSS fix while moving to establish anchor and heading
+        val fix1 = GnssFix(
+            timestampNanos = 1_000_000_000L,
+            position = Position(0.0, 0.0, 0.0),
+            velocityNed = dirNed * speedMps,
+            hasVelocity = true,
+            horizontalAccuracyM = 2.0,
+            verticalAccuracyM = 4.0,
+            speedAccuracyMps = 0.1,
+            satellitesUsed = 12,
+        )
+        engine.updateGnss(fix1)
+        assertTrue(engine.isHeadingInitialized)
+
+        // Propagate during a 20-second simulated blackout (300 meters)
+        var tNanos = 1_000_000_000L
+        val dtSec = 0.01 // 100 Hz IMU
+        val dtNanos = (dtSec * 1e9).toLong()
+
+        for (i in 0 until 2000) { // 20 seconds
+            tNanos += dtNanos
+            // Specific force in body frame: [0, 0, -g]
+            val specificForce = Vec3(0.0, 0.0, -9.80665)
+            engine.predict(tNanos, specificForce, Vec3(0.0, 0.0, 0.0))
+
+            // 10 Hz NHC aiding during blackout
+            if (i % 10 == 0) {
+                engine.updateNonHolonomic()
+            }
+        }
+
+        // True position along 40-degree road after 20 seconds
+        val truePos = dirNed * (speedMps * 20.0)
+        val estPos = engine.state().position
+        val err = estPos - truePos
+
+        // Road normal vector (perpendicular to 40 deg road)
+        val roadNormal = Vec3(-kotlin.math.sin(hdgRad), kotlin.math.cos(hdgRad), 0.0)
+        val crossTrackError = kotlin.math.abs(err.dot(roadNormal))
+
+        // Cross track error must remain tightly bounded within road corridor (< 1.5m), not shooting off into blocks!
+        assertTrue("Cross-track drift must remain < 1.5m, was $crossTrackError m", crossTrackError < 1.5)
+    }
+
+    @Test
+    fun testStationaryDuringBlackoutDoesNotDrift() {
+        val engine = UkfFusionEngine()
+        val initFix = GnssFix(
+            timestampNanos = 1_000_000_000L,
+            position = Position(0.0, 0.0, 0.0),
+            velocityNed = Vec3(0.0, 0.0, 0.0),
+            hasVelocity = true,
+            horizontalAccuracyM = 1.0,
+            verticalAccuracyM = 2.0,
+            speedAccuracyMps = 0.05,
+            satellitesUsed = 12,
+        )
+        engine.updateGnss(initFix)
+
+        // Simulate 10 seconds of blackout with phone tilted forward by 3 degrees (pitch tilt)
+        val tiltAngleRad = Math.toRadians(3.0)
+        val ax = -9.80665 * kotlin.math.sin(tiltAngleRad)
+        val az = -9.80665 * kotlin.math.cos(tiltAngleRad)
+        val tiltedAccel = Vec3(ax, 0.0, az)
+
+        var tNanos = 1_000_000_000L
+        val dtSec = 0.01 // 100 Hz
+        val dtNanos = (dtSec * 1e9).toLong()
+
+        for (i in 0 until 1000) { // 10 seconds
+            tNanos += dtNanos
+            engine.predict(tNanos, tiltedAccel, Vec3(0.0, 0.0, 0.0))
+
+            // 10 Hz ZUPT updates as applied during blackout standstill
+            if (i % 10 == 0) {
+                engine.updateZeroVelocity(0.05)
+            }
+        }
+
+        val finalSpeed = engine.state().velocity.norm()
+        val finalPosDrift = engine.state().position.norm()
+
+        assertTrue("Stationary vehicle speed must remain < 0.1 m/s, was $finalSpeed", finalSpeed < 0.1)
+        assertTrue("Stationary position drift must remain < 0.2 m, was $finalPosDrift", finalPosDrift < 0.2)
+    }
+
+    @Test
+    fun testVelocityModelAntiDivergenceRecovery() {
+        val engine = UkfFusionEngine(initialState = NavState(velocity = Vec3(30.0, 0.0, 0.0)))
+        assertEquals(30.0, engine.state().velocity.norm(), 0.1)
+
+        // Model predicts actual speed is 5.0 m/s (large divergence triggers gate rejection and immediate recovery)
+        val outcome1 = engine.updateVelocityModel(5.0)
+        assertEquals(UpdateOutcome.RejectedByGate, outcome1)
+
+        val recoveredSpeed = engine.state().velocity.norm()
+        assertEquals("Anti-divergence safeguard must pull velocity back to predicted speed", 5.0, recoveredSpeed, 0.5)
+
+        // Now that state velocity has been brought back to 5.0 m/s, subsequent model update is cleanly Applied
+        val outcome2 = engine.updateVelocityModel(5.0)
+        assertEquals(UpdateOutcome.Applied, outcome2)
+    }
+
+    @Test
+    fun testCompassAttitudeAlignment() {
+        val engine = UkfFusionEngine()
+        assertFalse(engine.isHeadingInitialized)
+
+        // Phone lying flat: accel is (0, 0, 9.80665), magnetic field points North (25 uT north, 40 uT down)
+        val accel = Vec3(0.0, 0.0, 9.80665)
+        val mag = Vec3(25.0, 0.0, 40.0)
+
+        engine.alignAttitudeWithCompass(accel, mag)
+
+        assertTrue("Heading must be initialized by compass", engine.isHeadingInitialized)
+        val forwardNed = engine.state().orientation.rotate(Vec3(1.0, 0.0, 0.0))
+        // Forward should point North (1, 0, 0)
+        assertEquals(1.0, forwardNed.x, 0.05)
+        assertEquals(0.0, forwardNed.y, 0.05)
+        assertEquals(0.0, forwardNed.z, 0.05)
     }
 }
 

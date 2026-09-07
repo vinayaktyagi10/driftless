@@ -96,6 +96,8 @@ class MainActivity : AppCompatActivity() {
     private var blackoutStartNanos = 0L
     private var blackoutDistanceM = 0.0
     private var lastBlackoutFusedNanos = 0L
+    private var blackoutEntrySpeed: Double = 0.0
+    private var wasStationaryBeforeBlackout: Boolean = false
 
     private enum class LocationAccess {
         Granted,
@@ -170,6 +172,17 @@ class MainActivity : AppCompatActivity() {
                 blackoutStartNanos = SystemClock.elapsedRealtimeNanos()
                 blackoutDistanceM = 0.0
                 lastBlackoutFusedNanos = blackoutStartNanos
+
+                // Record blackout entry speed & stationary status
+                val fix = latestFix
+                val gnssAgeSec = if (fix != null) (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNanos) / 1e9 else 999.0
+                val speedAtEntry = if (fix != null && gnssAgeSec < 3.0 && fix.hasVelocity) fix.velocityNed.norm() else engine.state().velocity.norm()
+                blackoutEntrySpeed = speedAtEntry
+                wasStationaryBeforeBlackout = speedAtEntry < 0.4
+                if (wasStationaryBeforeBlackout) {
+                    engine.updateZeroVelocity(0.05)
+                }
+
                 binding.blackoutButton.text = getString(R.string.action_blackout_stop)
                 binding.blackoutBanner.visibility = View.VISIBLE
                 updateBlackoutBanner()
@@ -281,6 +294,12 @@ class MainActivity : AppCompatActivity() {
                             latestFrame = frame
 
                             val sample = frame.toImuSample()
+                            // If heading is not yet initialized from GNSS course, initialize attitude using compass/magnetometer
+                            if (!engine.isHeadingInitialized && frame.mag != null) {
+                                val accelVec = Vec3(sample.accel[0].toDouble(), sample.accel[1].toDouble(), sample.accel[2].toDouble())
+                                val magVec = Vec3(frame.mag[0].toDouble(), frame.mag[1].toDouble(), frame.mag[2].toDouble())
+                                engine.alignAttitudeWithCompass(accelVec, magVec)
+                            }
                             engine.predict(sample)
 
                             // Feed sample to TFLite Velocity Model context window at 10 Hz (100 ms).
@@ -318,6 +337,7 @@ class MainActivity : AppCompatActivity() {
                             if (frame != null) {
                                 if (!anchorLogged) {
                                     logger.logAnchor(frame)
+                                    engine.resetPosition(Vec3(fix.position.north, fix.position.east, fix.position.down))
                                     anchorLogged = true
                                 }
                                 if (roadGraph == null) {
@@ -354,6 +374,31 @@ class MainActivity : AppCompatActivity() {
                                 if (isGnssStationary) {
                                     // Active GNSS confirms device is stationary: strictly enforce zero velocity
                                     engine.updateZeroVelocity(0.05)
+                                } else if (isSimulatedBlackout) {
+                                    // Simulated blackout aiding
+                                    val isImuStationary = velocityModel.isStationary()
+                                    val pred = velocityModel.predict()
+
+                                    if (isImuStationary || (wasStationaryBeforeBlackout && (pred == null || pred.speedMps <= 0.2f))) {
+                                        // Device is stationary or was parked at blackout onset: strictly enforce zero velocity
+                                        engine.updateZeroVelocity(0.05)
+                                    } else if (pred != null) {
+                                        if (pred.speedMps <= 0.1f) {
+                                            engine.updateZeroVelocity(0.05)
+                                        } else {
+                                            engine.updateVelocityModel(pred.speedMps.toDouble())
+                                        }
+                                    } else {
+                                        // Model warmup / fallback when moving: smoothly coast down speed from entry speed
+                                        val nowNanos = SystemClock.elapsedRealtimeNanos()
+                                        val blackoutSec = (nowNanos - blackoutStartNanos) / 1e9
+                                        val coastSpeed = max(0.0, blackoutEntrySpeed - 0.3 * blackoutSec)
+                                        if (coastSpeed <= 0.1) {
+                                            engine.updateZeroVelocity(0.05)
+                                        } else {
+                                            engine.updateVelocityModel(coastSpeed)
+                                        }
+                                    }
                                 } else if (velocityModel.isReady) {
                                     val pred = velocityModel.predict()
                                     if (pred != null) {
